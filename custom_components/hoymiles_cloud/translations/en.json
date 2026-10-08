@@ -7,8 +7,8 @@
         "data": {
           "username": "Username / Email",
           "password": "Password",
-          "plant_id": "Plant / Station ID (optional, auto-detected if empty)",
-          "use_estar": "Use Estar Power cloud servers (rare)"
+          "region": "Server Region (Auto-detect / Global / Europe / Estar)",
+          "plant_id": "Plant / Station ID (optional, auto-detected if empty)"
         }
       },
       "select_station": {

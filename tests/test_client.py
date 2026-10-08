@@ -28,19 +28,11 @@ def client():
 @pytest.mark.asyncio
 async def test_legacy_login_success(client):
     """Test legacy MD5 login flow."""
-    mock_resp = AsyncMock()
-    mock_resp.status = 200
-    mock_resp.json = AsyncMock(
-        return_value={"status": "0", "data": {"token": "test_legacy_token_123"}}
-    )
-
-    mock_session = MagicMock()
-    mock_session.post.return_value.__aenter__.return_value = mock_resp
-    mock_session.closed = False
-
-    client._session = mock_session
-
-    with patch.object(client, "_async_argon_login", return_value=None):
+    with patch.object(
+        client, "_async_v3_login", AsyncMock(return_value=(None, "v3 failed"))
+    ), patch.object(
+        client, "_async_legacy_login", AsyncMock(return_value=("test_legacy_token_123", None))
+    ):
         token = await client.async_login()
 
     assert token == "test_legacy_token_123"
@@ -49,33 +41,17 @@ async def test_legacy_login_success(client):
 
 
 @pytest.mark.asyncio
-async def test_argon_login_success(client):
-    """Test modern Argon2 challenge-response flow."""
+async def test_argon_salted_login_success(client):
+    """Test modern Argon2 salted challenge-response flow."""
     with patch(
         "custom_components.hoymiles_cloud.client.ARGON2_AVAILABLE", True
     ), patch.object(
+        client, "_pre_inspect_v3", AsyncMock(return_value=("nonce123", "aabbcc", None))
+    ), patch.object(
         client, "_async_argon_compute_challenge", AsyncMock(return_value="computed_challenge_hash")
+    ), patch.object(
+        client, "_login_v3_attempt", AsyncMock(return_value=("argon_token_xyz", None))
     ):
-        mock_pre_insp = AsyncMock()
-        mock_pre_insp.status = 200
-        mock_pre_insp.json = AsyncMock(
-            return_value={"status": "0", "data": {"n": "nonce123", "a": "aabbcc"}}
-        )
-
-        mock_login = AsyncMock()
-        mock_login.status = 200
-        mock_login.json = AsyncMock(
-            return_value={"status": "0", "data": {"token": "argon_token_xyz"}}
-        )
-
-        mock_session = MagicMock()
-        mock_session.post.return_value.__aenter__.side_effect = [
-            mock_pre_insp,
-            mock_login,
-        ]
-        mock_session.closed = False
-        client._session = mock_session
-
         token = await client.async_login()
 
     assert token == "argon_token_xyz"
@@ -84,13 +60,48 @@ async def test_argon_login_success(client):
 
 
 @pytest.mark.asyncio
+async def test_v3_unsalted_login_success(client):
+    """Test modern v3 unsalted flow when server returns empty salt."""
+    with patch.object(
+        client, "_pre_inspect_v3", AsyncMock(return_value=("nonce123", "", None))
+    ), patch.object(
+        client, "_login_v3_attempt", AsyncMock(return_value=("unsalted_token_456", None))
+    ):
+        token = await client.async_login()
+
+    assert token == "unsalted_token_456"
+    assert client.token == "unsalted_token_456"
+    assert client.api_version == "1"
+
+
+@pytest.mark.asyncio
+async def test_auto_fallback_to_eu_gateway(client):
+    """Test automatic fallback to EU gateway when Global fails."""
+    async def mock_v3(url):
+        if "euapi" in url:
+            return "eu_token_789", None
+        return None, "Login failed on global"
+
+    with patch.object(client, "_async_v3_login", side_effect=mock_v3), patch.object(
+        client, "_async_legacy_login", AsyncMock(return_value=(None, "legacy failed"))
+    ):
+        token = await client.async_login()
+
+    assert token == "eu_token_789"
+    assert "euapi.hoymiles.com" in client.base_url
+
+
+@pytest.mark.asyncio
 async def test_login_failure_raises_auth_error(client):
     """Test that failed authentication raises HoymilesAuthError."""
-    with patch.object(client, "_async_argon_login", return_value=None), patch.object(
-        client, "_async_legacy_login", return_value=None
+    with patch.object(
+        client, "_async_v3_login", AsyncMock(return_value=(None, "User not found"))
+    ), patch.object(
+        client, "_async_legacy_login", AsyncMock(return_value=(None, "Legacy error"))
     ):
         with pytest.raises(HoymilesAuthError):
             await client.async_login()
+
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -25,6 +27,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Base URLs
 DEFAULT_BASE_URL = "https://neapi.hoymiles.com/"
+API_EU_BASE_URL = "https://euapi.hoymiles.com/"
 ESTAR_BASE_URL = "https://monitor.estarpower.com/platform/api/gateway/"
 
 # Endpoints
@@ -55,7 +58,12 @@ ENDPOINT_MICRO_DETAILS = {
 HEADER_JSON = {
     "Content-Type": "application/json",
     "Accept": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+        " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
 }
+
 
 
 class HoymilesError(Exception):
@@ -158,16 +166,30 @@ class HoymilesCloudClient:
         if self._custom_session is None and self._session and not self._session.closed:
             await self._session.close()
 
-    async def _async_argon_compute_challenge(self, salt_hex: str) -> str:
+    @staticmethod
+    def _decode_v3_salt(salt_value: str) -> bytes:
+        """Decode a v3 salt value from hex or base64 format."""
+        s = salt_value.strip()
+        if len(s) % 2 == 0:
+            try:
+                return bytes.fromhex(s)
+            except ValueError:
+                pass
+
+        try:
+            return base64.b64decode(s, validate=True)
+        except (binascii.Error, ValueError):
+            return s.encode("utf-8")
+
+    async def _async_argon_compute_challenge(self, salt_bytes: bytes) -> str:
         """Compute the Argon2 ID challenge hash offloaded from event loop."""
         if not ARGON2_AVAILABLE or hash_secret_raw is None or Type is None:
             raise RuntimeError("argon2-cffi is required for modern Hoymiles authentication")
 
         def _compute() -> str:
-            salt = bytes.fromhex(salt_hex)
             raw = hash_secret_raw(
                 secret=self.password.encode("utf-8"),
-                salt=salt,
+                salt=salt_bytes,
                 time_cost=3,
                 memory_cost=32768,
                 parallelism=1,
@@ -179,150 +201,192 @@ class HoymilesCloudClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _compute)
 
-    async def _request(
-        self,
-        endpoint: str,
-        payload: dict[str, Any],
-        requires_auth: bool = True,
-        retry_on_auth_fail: bool = True,
-    ) -> dict[str, Any]:
-        """Send a POST request to the API."""
-        url = self.base_url.rstrip("/") + "/" + endpoint.lstrip("/")
-        session = await self._get_session()
+    async def _pre_inspect_v3(
+        self, base_url: str
+    ) -> tuple[str | None, str | None, str | None]:
+        """Run pre-inspect on the target base URL.
 
-        headers = dict(HEADER_JSON)
-        if requires_auth:
-            if not self.token:
-                await self.async_login()
-            headers["Authorization"] = self.token or ""
+        Returns (nonce, salt, error_message).
+        """
+        url = base_url.rstrip("/") + "/" + ARGON_PRE_INSP_API
+        session = await self._get_session()
 
         try:
             async with session.post(
-                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)
-            ) as response:
-                if response.status in (401, 403):
-                    if retry_on_auth_fail:
-                        _LOGGER.debug("Got %s, re-authenticating and retrying", response.status)
-                        await self.async_login()
-                        return await self._request(
-                            endpoint, payload, requires_auth, retry_on_auth_fail=False
-                        )
-                    raise HoymilesAuthError(f"HTTP Authentication failure: {response.status}")
-
-                if response.status != 200:
-                    raise HoymilesConnectionError(
-                        f"Unexpected HTTP status {response.status} from {endpoint}"
-                    )
-
-                data: dict[str, Any] = await response.json()
-
-        except asyncio.TimeoutError as err:
-            raise HoymilesConnectionError(f"Timeout connecting to {url}") from err
-        except aiohttp.ClientError as err:
-            raise HoymilesConnectionError(f"Network error connecting to {url}: {err}") from err
-
-        # Check API status code
-        status = str(data.get("status", ""))
-
-        # Status 100 indicates expired token
-        if status == "100" and retry_on_auth_fail:
-            _LOGGER.debug("API reports token expired (status 100); renewing token")
-            await self.async_login()
-            return await self._request(
-                endpoint, payload, requires_auth, retry_on_auth_fail=False
-            )
-
-        if status not in ("0", "200"):
-            msg = data.get("message") or f"API error status {status}"
-            raise HoymilesApiError(msg)
-
-        return data
-
-    async def async_login(self) -> str:
-        """Authenticate with the cloud and acquire an authorization token."""
-        async with self._lock:
-            # 1. Try modern Argon2 flow first
-            if ARGON2_AVAILABLE:
-                try:
-                    token = await self._async_argon_login()
-                    if token:
-                        self.token = token
-                        self.api_version = "1"
-                        _LOGGER.debug("Logged in successfully using Argon2 (API v1)")
-                        return token
-                except Exception as err:
-                    _LOGGER.debug("Argon2 authentication failed, falling back to legacy: %s", err)
-
-            # 2. Fallback to legacy MD5 flow
-            token = await self._async_legacy_login()
-            if token:
-                self.token = token
-                self.api_version = "0"
-                _LOGGER.debug("Logged in successfully using legacy MD5 (API v0)")
-                return token
-
-            raise HoymilesAuthError("Failed to authenticate with Hoymiles Cloud API")
-
-    async def _async_argon_login(self) -> str | None:
-        """Execute Argon2 pre-inspect and challenge-response authentication."""
-        url = self.base_url.rstrip("/") + "/" + ARGON_PRE_INSP_API
-        session = await self._get_session()
-
-        pre_insp_payload = {"u": self.username}
-        async with session.post(
-            url, json=pre_insp_payload, headers=HEADER_JSON, timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
+                url,
+                json={"u": self.username},
+                headers=HEADER_JSON,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    return None, None, f"HTTP status {resp.status} on pre-inspect"
+                data = await resp.json()
+        except Exception as err:
+            return None, None, str(err)
 
         if str(data.get("status")) != "0":
-            return None
+            return None, None, data.get("message") or "Pre-inspect returned non-zero"
 
         insp_data = data.get("data", {})
         nonce = insp_data.get("n")
         salt = insp_data.get("a")
-        if not nonce or not salt:
-            return None
+        return nonce, salt, None
 
-        challenge = await self._async_argon_compute_challenge(salt)
+    async def _login_v3_attempt(
+        self, base_url: str, credential_hash: str, nonce: str
+    ) -> tuple[str | None, str | None]:
+        """Attempt a single v3 login request.
 
-        login_url = self.base_url.rstrip("/") + "/" + ARGON_LOGIN_API
-        login_payload = {"u": self.username, "ch": challenge, "n": nonce}
-        async with session.post(
-            login_url, json=login_payload, headers=HEADER_JSON, timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status != 200:
-                return None
-            login_data = await resp.json()
+        Returns (token, error_message).
+        """
+        login_url = base_url.rstrip("/") + "/" + ARGON_LOGIN_API
+        session = await self._get_session()
+        login_payload = {"u": self.username, "ch": credential_hash, "n": nonce}
 
-        if str(login_data.get("status")) != "0":
-            return None
+        try:
+            async with session.post(
+                login_url,
+                json=login_payload,
+                headers=HEADER_JSON,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    return None, f"HTTP status {resp.status} on login"
+                login_data = await resp.json()
+        except Exception as err:
+            return None, str(err)
 
-        return login_data.get("data", {}).get("token")
+        if str(login_data.get("status")) == "0":
+            token = login_data.get("data", {}).get("token", "")
+            if token:
+                return token, None
 
-    async def _async_legacy_login(self) -> str | None:
+        return None, login_data.get("message") or "Login failed"
+
+    async def _async_v3_login(
+        self, base_url: str
+    ) -> tuple[str | None, str | None]:
+        """Execute modern v3 login supporting both salted and unsalted flows."""
+        nonce, salt, err = await self._pre_inspect_v3(base_url)
+        if not nonce:
+            return None, err or "Failed to retrieve pre-inspection nonce"
+
+        # Case 1: Server provided a salt -> Compute Argon2id hash
+        salt_str = (salt or "").strip()
+        if salt_str and ARGON2_AVAILABLE:
+            try:
+                salt_bytes = self._decode_v3_salt(salt_str)
+                ch = await self._async_argon_compute_challenge(salt_bytes)
+                token, login_err = await self._login_v3_attempt(base_url, ch, nonce)
+                if token:
+                    return token, None
+                _LOGGER.debug(
+                    "Argon2 salted login failed on %s: %s", base_url, login_err
+                )
+            except Exception as ex:
+                _LOGGER.debug("Argon2 challenge computation failed: %s", ex)
+
+        # Case 2: Salt is empty/null or Argon2 not available -> Try unsalted browser formats
+        md5_hex = hashlib.md5(self.password.encode("utf-8")).hexdigest()
+        sha256_bytes = hashlib.sha256(self.password.encode("utf-8")).digest()
+        sha256_hex = hashlib.sha256(self.password.encode("utf-8")).hexdigest()
+        sha256_b64 = base64.b64encode(sha256_bytes).decode("ascii")
+        composite_hash = f"{md5_hex}.{sha256_b64}"
+
+        candidates = [
+            ("composite", composite_hash),
+            ("sha256_hex", sha256_hex),
+            ("md5_hex", md5_hex),
+        ]
+
+        last_error = err or "Login failed"
+        for i, (name, cand_hash) in enumerate(candidates):
+            if i > 0:
+                # Nonce is single-use: re-run pre-inspect to get a fresh nonce
+                retry_nonce, _, retry_err = await self._pre_inspect_v3(base_url)
+                if not retry_nonce:
+                    continue
+                nonce = retry_nonce
+
+            token, login_err = await self._login_v3_attempt(
+                base_url, cand_hash, nonce
+            )
+            if token:
+                _LOGGER.debug(
+                    "v3 unsalted login succeeded on %s with variant %s", base_url, name
+                )
+                return token, None
+            last_error = login_err or last_error
+
+        return None, last_error
+
+    async def _async_legacy_login(
+        self, base_url: str
+    ) -> tuple[str | None, str | None]:
         """Execute legacy MD5 authentication."""
         pass_hash = hashlib.md5(self.password.encode("utf-8")).hexdigest()
-        url = self.base_url.rstrip("/") + "/" + LEGACY_LOGIN_API
+        url = base_url.rstrip("/") + "/" + LEGACY_LOGIN_API
         session = await self._get_session()
 
         payload = {
             "password": pass_hash,
             "user_name": self.username,
         }
-        async with session.post(
-            url, json=payload, headers=HEADER_JSON, timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
+        try:
+            async with session.post(
+                url, json=payload, headers=HEADER_JSON, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status != 200:
+                    return None, f"HTTP status {resp.status}"
+                data = await resp.json()
+        except Exception as err:
+            return None, str(err)
 
         if str(data.get("status")) != "0":
-            return None
+            return None, data.get("message") or "Legacy login failed"
 
         token_data = data.get("data", {})
-        return token_data.get("token") or token_data.get("estar_token")
+        token = token_data.get("token") or token_data.get("estar_token")
+        return token, None
+
+    async def async_login(self) -> str:
+        """Authenticate with the cloud and acquire an authorization token."""
+        async with self._lock:
+            urls_to_try = [self.base_url]
+            # Automatically try EU gateway as fallback if default global was configured
+            if (
+                self.base_url.rstrip("/") == DEFAULT_BASE_URL.rstrip("/")
+                and not self.estar_mode
+            ):
+                urls_to_try.append(API_EU_BASE_URL)
+
+            last_error: str = "Invalid credentials"
+            for target_url in urls_to_try:
+                _LOGGER.debug("Attempting authentication against: %s", target_url)
+
+                # 1. Try modern v3 login (salted Argon2 and unsalted candidates)
+                token, err = await self._async_v3_login(target_url)
+                if token:
+                    self.token = token
+                    self.base_url = target_url
+                    self.api_version = "1"
+                    _LOGGER.info("Authenticated successfully on %s (v3)", target_url)
+                    return token
+                if err:
+                    last_error = err
+
+                # 2. Try legacy v0 MD5 login as fallback
+                token, err_leg = await self._async_legacy_login(target_url)
+                if token:
+                    self.token = token
+                    self.base_url = target_url
+                    self.api_version = "0"
+                    _LOGGER.info("Authenticated successfully on %s (legacy v0)", target_url)
+                    return token
+                if err_leg:
+                    last_error = err_leg
+
+            raise HoymilesAuthError(f"{last_error}")
 
     async def async_get_stations(self) -> list[StationSummary]:
         """Fetch list of solar stations accessible by the account."""

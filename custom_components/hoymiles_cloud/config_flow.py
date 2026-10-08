@@ -24,12 +24,18 @@ from .const import (
     CONF_BASE_URL,
     CONF_PLANT_ID,
     CONF_PLANT_NAME,
+    CONF_REGION,
     CONF_SCAN_INTERVAL,
     CONF_USE_ESTAR,
     DEFAULT_BASE_URL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MIN_SCAN_INTERVAL,
+    REGION_AUTO,
+    REGION_ESTAR,
+    REGION_EUROPE,
+    REGION_GLOBAL,
+    REGION_URL_MAP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +50,8 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._username: str | None = None
         self._password: str | None = None
+        self._base_url: str = DEFAULT_BASE_URL
+        self._region: str = REGION_AUTO
         self._use_estar: bool = False
         self._stations: list[StationSummary] = []
 
@@ -56,7 +64,12 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._username = user_input[CONF_USERNAME].strip()
             self._password = user_input[CONF_PASSWORD].strip()
-            self._use_estar = user_input.get(CONF_USE_ESTAR, False)
+            self._region = user_input.get(CONF_REGION, REGION_AUTO)
+            self._use_estar = (
+                self._region == REGION_ESTAR
+                or user_input.get(CONF_USE_ESTAR, False)
+            )
+            self._base_url = REGION_URL_MAP.get(self._region, DEFAULT_BASE_URL)
             manual_plant_id = user_input.get(CONF_PLANT_ID)
 
             session = async_get_clientsession(self.hass)
@@ -64,6 +77,7 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 username=self._username,
                 password=self._password,
                 session=session,
+                base_url=self._base_url,
                 use_estar=self._use_estar,
             )
 
@@ -82,6 +96,7 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_PASSWORD: self._password,
                             CONF_PLANT_ID: plant_id,
                             CONF_PLANT_NAME: f"Hoymiles Plant {plant_id}",
+                            CONF_REGION: self._region,
                             CONF_USE_ESTAR: self._use_estar,
                             CONF_BASE_URL: client.base_url,
                         },
@@ -103,6 +118,7 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_PASSWORD: self._password,
                             CONF_PLANT_ID: station.id,
                             CONF_PLANT_NAME: station.name,
+                            CONF_REGION: self._region,
                             CONF_USE_ESTAR: self._use_estar,
                             CONF_BASE_URL: client.base_url,
                         },
@@ -110,11 +126,14 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     return await self.async_step_select_station()
 
-            except HoymilesAuthError:
+            except HoymilesAuthError as err:
+                _LOGGER.warning("Hoymiles authentication error: %s", err)
                 errors["base"] = "invalid_auth"
-            except HoymilesConnectionError:
+            except HoymilesConnectionError as err:
+                _LOGGER.warning("Hoymiles connection error: %s", err)
                 errors["base"] = "cannot_connect"
-            except HoymilesError:
+            except HoymilesError as err:
+                _LOGGER.warning("Hoymiles API error: %s", err)
                 errors["base"] = "cannot_connect"
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected exception in Hoymiles config flow")
@@ -124,8 +143,15 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(CONF_USERNAME): str,
                 vol.Required(CONF_PASSWORD): str,
+                vol.Optional(CONF_REGION, default=REGION_AUTO): vol.In(
+                    [
+                        REGION_AUTO,
+                        REGION_GLOBAL,
+                        REGION_EUROPE,
+                        REGION_ESTAR,
+                    ]
+                ),
                 vol.Optional(CONF_PLANT_ID): str,
-                vol.Optional(CONF_USE_ESTAR, default=False): bool,
             }
         )
 
