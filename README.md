@@ -3,8 +3,8 @@
 A modern, native Home Assistant custom integration (HACS) to monitor your **Hoymiles Solar System** using your existing Hoymiles hardware and DTU (DTU-W100, DTU-Pro, DTU-WLite, etc.) via the S-Miles Cloud API.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/default)
-[![GitHub release](https://img.shields.io/github/v/release/valtteri-aho/hoymiles?include_prereleases)](https://github.com/valtteri-aho/hoymiles/releases)
-[![License](https://img.shields.io/github/license/valtteri-aho/hoymiles)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/ValtteriAho/hoymiles?include_prereleases)](https://github.com/ValtteriAho/hoymiles/releases)
+[![License](https://img.shields.io/github/license/ValtteriAho/hoymiles)](LICENSE)
 
 ---
 
@@ -43,7 +43,7 @@ A modern, native Home Assistant custom integration (HACS) to monitor your **Hoym
 1. Open **HACS** in your Home Assistant sidebar.
 2. Go to **Integrations**, click the three dots (**⋮**) in the top right corner, and select **Custom repositories**.
 3. Add:
-   - **Repository:** `https://github.com/valtteri-aho/hoymiles`
+   - **Repository:** `https://github.com/ValtteriAho/hoymiles`
    - **Category:** `Integration`
 4. Click **Add**, find **Hoymiles Solar Cloud**, and click **Download**.
 5. Restart Home Assistant.
