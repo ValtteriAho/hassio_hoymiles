@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="img/dark_logo.png">
+    <img src="img/logo.png" alt="Hoymiles Solar Cloud" width="460">
+  </picture>
+</p>
+
 # Hoymiles Solar Cloud Integration for Home Assistant
 
 A modern, native Home Assistant custom integration (HACS) to monitor your **Hoymiles Solar System** using your existing Hoymiles hardware and DTU (DTU-W100, DTU-Pro, DTU-WLite, etc.) via the S-Miles Cloud API.
