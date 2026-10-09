@@ -14,6 +14,20 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from .const import (
+    API_EU_BASE_URL,
+    DEFAULT_BASE_URL,
+    DEFAULT_HOME_APP_VERSION,
+    DEFAULT_INSTALLER_APP_VERSION,
+    ESTAR_BASE_URL,
+    HOME_CLIENT_DC,
+    HOME_CLIENT_TID,
+    PROFILE_AUTO,
+    PROFILE_HOME,
+    PROFILE_INSTALLER,
+    PROFILE_WEB,
+)
+
 try:
     from argon2.low_level import Type, hash_secret_raw
 
@@ -24,11 +38,6 @@ except ImportError:
     ARGON2_AVAILABLE = False
 
 _LOGGER = logging.getLogger(__name__)
-
-# Base URLs
-DEFAULT_BASE_URL = "https://neapi.hoymiles.com/"
-API_EU_BASE_URL = "https://euapi.hoymiles.com/"
-ESTAR_BASE_URL = "https://monitor.estarpower.com/platform/api/gateway/"
 
 # Endpoints
 ARGON_PRE_INSP_API = "iam/pub/3/auth/pre-insp"
@@ -143,6 +152,7 @@ class HoymilesCloudClient:
         session: aiohttp.ClientSession | None = None,
         base_url: str = DEFAULT_BASE_URL,
         use_estar: bool = False,
+        profile: str = PROFILE_AUTO,
     ) -> None:
         """Initialize the client."""
         self.username = username
@@ -151,9 +161,34 @@ class HoymilesCloudClient:
         self._session: aiohttp.ClientSession | None = session
         self.base_url = ESTAR_BASE_URL if use_estar else base_url
         self.estar_mode = use_estar
+        self.profile = profile
+        self.active_profile = profile
         self.token: str | None = None
         self.api_version: str = "1"
         self._lock = asyncio.Lock()
+
+    def _get_headers(self, profile: str | None = None) -> dict[str, str]:
+        """Build request headers for the specified or active client profile."""
+        effective_profile = profile or self.active_profile or PROFILE_AUTO
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if effective_profile == PROFILE_HOME:
+            headers["User-Agent"] = (
+                f"sma/ad/{DEFAULT_HOME_APP_VERSION}/{HOME_CLIENT_TID}/{HOME_CLIENT_DC}"
+            )
+        elif effective_profile == PROFILE_INSTALLER:
+            headers["User-Agent"] = f"S-Miles Installer/{DEFAULT_INSTALLER_APP_VERSION}"
+            headers["X-Client-Type"] = "mobile"
+            headers["App-Version"] = DEFAULT_INSTALLER_APP_VERSION
+            headers["X-App-Version"] = DEFAULT_INSTALLER_APP_VERSION
+        else:
+            headers["User-Agent"] = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+                " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        return headers
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Ensure an open aiohttp ClientSession."""
@@ -202,7 +237,7 @@ class HoymilesCloudClient:
         return await loop.run_in_executor(None, _compute)
 
     async def _pre_inspect_v3(
-        self, base_url: str
+        self, base_url: str, profile: str | None = None
     ) -> tuple[str | None, str | None, str | None]:
         """Run pre-inspect on the target base URL.
 
@@ -210,22 +245,28 @@ class HoymilesCloudClient:
         """
         url = base_url.rstrip("/") + "/" + ARGON_PRE_INSP_API
         session = await self._get_session()
+        headers = self._get_headers(profile)
 
         try:
             async with session.post(
                 url,
                 json={"u": self.username},
-                headers=HEADER_JSON,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
-                    return None, None, f"HTTP status {resp.status} on pre-inspect"
-                data = await resp.json()
+                    return None, None, f"HTTP status {resp.status} on pre-inspect ({base_url})"
+                try:
+                    data = await resp.json()
+                except Exception:
+                    text = await resp.text()
+                    return None, None, f"Non-JSON response from {base_url}: {text[:80]}"
         except Exception as err:
-            return None, None, str(err)
+            return None, None, f"Network error contacting {base_url}: {err}"
 
         if str(data.get("status")) != "0":
-            return None, None, data.get("message") or "Pre-inspect returned non-zero"
+            msg = data.get("message") or f"Pre-inspect returned status {data.get('status')}"
+            return None, None, msg
 
         insp_data = data.get("data", {})
         nonce = insp_data.get("n")
@@ -233,7 +274,7 @@ class HoymilesCloudClient:
         return nonce, salt, None
 
     async def _login_v3_attempt(
-        self, base_url: str, credential_hash: str, nonce: str
+        self, base_url: str, credential_hash: str, nonce: str, profile: str | None = None
     ) -> tuple[str | None, str | None]:
         """Attempt a single v3 login request.
 
@@ -242,32 +283,38 @@ class HoymilesCloudClient:
         login_url = base_url.rstrip("/") + "/" + ARGON_LOGIN_API
         session = await self._get_session()
         login_payload = {"u": self.username, "ch": credential_hash, "n": nonce}
+        headers = self._get_headers(profile)
 
         try:
             async with session.post(
                 login_url,
                 json=login_payload,
-                headers=HEADER_JSON,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
-                    return None, f"HTTP status {resp.status} on login"
-                login_data = await resp.json()
+                    return None, f"HTTP status {resp.status} on login ({login_url})"
+                try:
+                    login_data = await resp.json()
+                except Exception:
+                    text = await resp.text()
+                    return None, f"Non-JSON response from {base_url}: {text[:80]}"
         except Exception as err:
-            return None, str(err)
+            return None, f"Network error contacting {login_url}: {err}"
 
         if str(login_data.get("status")) == "0":
             token = login_data.get("data", {}).get("token", "")
             if token:
                 return token, None
 
-        return None, login_data.get("message") or "Login failed"
+        msg = login_data.get("message") or f"Login failed (status {login_data.get('status')})"
+        return None, msg
 
     async def _async_v3_login(
-        self, base_url: str
+        self, base_url: str, profile: str | None = None
     ) -> tuple[str | None, str | None]:
         """Execute modern v3 login supporting both salted and unsalted flows."""
-        nonce, salt, err = await self._pre_inspect_v3(base_url)
+        nonce, salt, err = await self._pre_inspect_v3(base_url, profile=profile)
         if not nonce:
             return None, err or "Failed to retrieve pre-inspection nonce"
 
@@ -277,11 +324,16 @@ class HoymilesCloudClient:
             try:
                 salt_bytes = self._decode_v3_salt(salt_str)
                 ch = await self._async_argon_compute_challenge(salt_bytes)
-                token, login_err = await self._login_v3_attempt(base_url, ch, nonce)
+                token, login_err = await self._login_v3_attempt(
+                    base_url, ch, nonce, profile=profile
+                )
                 if token:
                     return token, None
                 _LOGGER.debug(
-                    "Argon2 salted login failed on %s: %s", base_url, login_err
+                    "Argon2 salted login failed on %s (profile %s): %s",
+                    base_url,
+                    profile,
+                    login_err,
                 )
             except Exception as ex:
                 _LOGGER.debug("Argon2 challenge computation failed: %s", ex)
@@ -303,17 +355,22 @@ class HoymilesCloudClient:
         for i, (name, cand_hash) in enumerate(candidates):
             if i > 0:
                 # Nonce is single-use: re-run pre-inspect to get a fresh nonce
-                retry_nonce, _, retry_err = await self._pre_inspect_v3(base_url)
+                retry_nonce, _, retry_err = await self._pre_inspect_v3(
+                    base_url, profile=profile
+                )
                 if not retry_nonce:
                     continue
                 nonce = retry_nonce
 
             token, login_err = await self._login_v3_attempt(
-                base_url, cand_hash, nonce
+                base_url, cand_hash, nonce, profile=profile
             )
             if token:
                 _LOGGER.debug(
-                    "v3 unsalted login succeeded on %s with variant %s", base_url, name
+                    "v3 unsalted login succeeded on %s (profile %s) with variant %s",
+                    base_url,
+                    profile,
+                    name,
                 )
                 return token, None
             last_error = login_err or last_error
@@ -321,12 +378,13 @@ class HoymilesCloudClient:
         return None, last_error
 
     async def _async_legacy_login(
-        self, base_url: str
+        self, base_url: str, profile: str | None = None
     ) -> tuple[str | None, str | None]:
         """Execute legacy MD5 authentication."""
         pass_hash = hashlib.md5(self.password.encode("utf-8")).hexdigest()
         url = base_url.rstrip("/") + "/" + LEGACY_LOGIN_API
         session = await self._get_session()
+        headers = self._get_headers(profile)
 
         payload = {
             "password": pass_hash,
@@ -334,7 +392,7 @@ class HoymilesCloudClient:
         }
         try:
             async with session.post(
-                url, json=payload, headers=HEADER_JSON, timeout=aiohttp.ClientTimeout(total=15)
+                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 if resp.status != 200:
                     return None, f"HTTP status {resp.status}"
@@ -352,41 +410,167 @@ class HoymilesCloudClient:
     async def async_login(self) -> str:
         """Authenticate with the cloud and acquire an authorization token."""
         async with self._lock:
+            # Determine profile sequence
+            if self.profile == PROFILE_AUTO:
+                profiles_to_try = [PROFILE_HOME, PROFILE_WEB, PROFILE_INSTALLER]
+            else:
+                profiles_to_try = [self.profile]
+
+            # Determine URL gateways to try
             urls_to_try = [self.base_url]
-            # Automatically try EU gateway as fallback if default global was configured
-            if (
-                self.base_url.rstrip("/") == DEFAULT_BASE_URL.rstrip("/")
-                and not self.estar_mode
-            ):
-                urls_to_try.append(API_EU_BASE_URL)
+            if not self.estar_mode:
+                if self.base_url.rstrip("/") == DEFAULT_BASE_URL.rstrip("/"):
+                    urls_to_try.append(API_EU_BASE_URL)
+                elif self.base_url.rstrip("/") == API_EU_BASE_URL.rstrip("/"):
+                    urls_to_try.append(DEFAULT_BASE_URL)
 
-            last_error: str = "Invalid credentials"
-            for target_url in urls_to_try:
-                _LOGGER.debug("Attempting authentication against: %s", target_url)
+            failure_details: list[str] = []
 
-                # 1. Try modern v3 login (salted Argon2 and unsalted candidates)
-                token, err = await self._async_v3_login(target_url)
-                if token:
-                    self.token = token
-                    self.base_url = target_url
-                    self.api_version = "1"
-                    _LOGGER.info("Authenticated successfully on %s (v3)", target_url)
-                    return token
-                if err:
-                    last_error = err
+            for prof in profiles_to_try:
+                for target_url in urls_to_try:
+                    _LOGGER.info(
+                        "Attempting Hoymiles authentication against %s (profile: %s)",
+                        target_url,
+                        prof,
+                    )
 
-                # 2. Try legacy v0 MD5 login as fallback
-                token, err_leg = await self._async_legacy_login(target_url)
-                if token:
-                    self.token = token
-                    self.base_url = target_url
-                    self.api_version = "0"
-                    _LOGGER.info("Authenticated successfully on %s (legacy v0)", target_url)
-                    return token
-                if err_leg:
-                    last_error = err_leg
+                    # 1. Try modern v3 login (salted Argon2 and unsalted candidates)
+                    token, err = await self._async_v3_login(target_url, profile=prof)
+                    if token:
+                        self.token = token
+                        self.base_url = target_url
+                        self.active_profile = prof
+                        self.api_version = "1"
+                        _LOGGER.info(
+                            "Authenticated successfully on %s with profile '%s' (v3)",
+                            target_url,
+                            prof,
+                        )
+                        return token
+                    if err:
+                        msg = f"[{prof} @ {target_url}] v3: {err}"
+                        _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
+                        failure_details.append(msg)
 
-            raise HoymilesAuthError(f"{last_error}")
+                    # 2. Try legacy v0 MD5 login as fallback
+                    token, err_leg = await self._async_legacy_login(
+                        target_url, profile=prof
+                    )
+                    if token:
+                        self.token = token
+                        self.base_url = target_url
+                        self.active_profile = prof
+                        self.api_version = "0"
+                        _LOGGER.info(
+                            "Authenticated successfully on %s with profile '%s' (legacy v0)",
+                            target_url,
+                            prof,
+                        )
+                        return token
+                    if err_leg:
+                        msg = f"[{prof} @ {target_url}] legacy: {err_leg}"
+                        _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
+                        failure_details.append(msg)
+
+            # Choose the most specific error message to present to user
+            best_error = "Invalid username or password"
+            for detail in failure_details:
+                lower = detail.lower()
+                if (
+                    "s-miles home" in lower
+                    or "password" in lower
+                    or "user" in lower
+                    or "account" in lower
+                ):
+                    best_error = detail
+                    break
+            else:
+                if failure_details:
+                    best_error = failure_details[0]
+
+            _LOGGER.error(
+                "All Hoymiles authentication attempts failed: %s", failure_details
+            )
+            raise HoymilesAuthError(best_error)
+
+    async def _request(
+        self,
+        endpoint: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Make an authenticated POST request to the API."""
+        if not self.token:
+            await self.async_login()
+
+        url = self.base_url.rstrip("/") + "/" + endpoint.lstrip("/")
+        session = await self._get_session()
+        headers = self._get_headers(self.active_profile)
+        if self.token:
+            headers["Authorization"] = self.token
+            headers["token"] = self.token
+
+        try:
+            async with session.post(
+                url,
+                json=payload or {},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status == 401:
+                    reauth_needed = True
+                    data = {}
+                elif resp.status != 200:
+                    raise HoymilesConnectionError(
+                        f"HTTP status {resp.status} on {endpoint}"
+                    )
+                else:
+                    data = await resp.json()
+                    status_str = str(data.get("status", "0"))
+                    msg_lower = str(data.get("message", "")).lower()
+                    reauth_needed = status_str in ("100", "101", "102") or ("token" in msg_lower and "expired" in msg_lower)
+
+                if reauth_needed:
+                    _LOGGER.info(
+                        "Token expired or rejected, re-authenticating..."
+                    )
+                    await self.async_login()
+                    headers = self._get_headers(self.active_profile)
+                    if self.token:
+                        headers["Authorization"] = self.token
+                        headers["token"] = self.token
+                    async with session.post(
+                        url,
+                        json=payload or {},
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=20),
+                    ) as retry_resp:
+                        if retry_resp.status != 200:
+                            raise HoymilesConnectionError(
+                                f"HTTP status {retry_resp.status} on {endpoint}"
+                            )
+                        data = await retry_resp.json()
+        except aiohttp.ClientError as err:
+            raise HoymilesConnectionError(
+                f"Connection error on {endpoint}: {err}"
+            ) from err
+        except Exception as err:
+            if isinstance(err, HoymilesError):
+                raise
+            raise HoymilesApiError(
+                f"Unexpected error on {endpoint}: {err}"
+            ) from err
+
+        if not isinstance(data, dict):
+            raise HoymilesApiError(
+                f"Malformed response on {endpoint}: expected JSON object"
+            )
+
+        if str(data.get("status")) != "0":
+            msg = data.get("message") or f"API error status {data.get('status')}"
+            raise HoymilesApiError(f"Error on {endpoint}: {msg}")
+
+        return data
+
 
     async def async_get_stations(self) -> list[StationSummary]:
         """Fetch list of solar stations accessible by the account."""

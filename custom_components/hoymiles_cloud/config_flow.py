@@ -24,6 +24,7 @@ from .const import (
     CONF_BASE_URL,
     CONF_PLANT_ID,
     CONF_PLANT_NAME,
+    CONF_PROFILE,
     CONF_REGION,
     CONF_SCAN_INTERVAL,
     CONF_USE_ESTAR,
@@ -31,6 +32,10 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MIN_SCAN_INTERVAL,
+    PROFILE_AUTO,
+    PROFILE_HOME,
+    PROFILE_INSTALLER,
+    PROFILE_WEB,
     REGION_AUTO,
     REGION_ESTAR,
     REGION_EUROPE,
@@ -52,6 +57,7 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._password: str | None = None
         self._base_url: str = DEFAULT_BASE_URL
         self._region: str = REGION_AUTO
+        self._profile: str = PROFILE_AUTO
         self._use_estar: bool = False
         self._stations: list[StationSummary] = []
 
@@ -60,11 +66,13 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Handle the initial step."""
         errors: dict[str, str] = {}
+        error_detail: str | None = None
 
         if user_input is not None:
             self._username = user_input[CONF_USERNAME].strip()
             self._password = user_input[CONF_PASSWORD].strip()
             self._region = user_input.get(CONF_REGION, REGION_AUTO)
+            self._profile = user_input.get(CONF_PROFILE, PROFILE_AUTO)
             self._use_estar = (
                 self._region == REGION_ESTAR
                 or user_input.get(CONF_USE_ESTAR, False)
@@ -79,6 +87,7 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 session=session,
                 base_url=self._base_url,
                 use_estar=self._use_estar,
+                profile=self._profile,
             )
 
             try:
@@ -97,6 +106,7 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_PLANT_ID: plant_id,
                             CONF_PLANT_NAME: f"Hoymiles Plant {plant_id}",
                             CONF_REGION: self._region,
+                            CONF_PROFILE: client.active_profile,
                             CONF_USE_ESTAR: self._use_estar,
                             CONF_BASE_URL: client.base_url,
                         },
@@ -119,6 +129,7 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_PLANT_ID: station.id,
                             CONF_PLANT_NAME: station.name,
                             CONF_REGION: self._region,
+                            CONF_PROFILE: client.active_profile,
                             CONF_USE_ESTAR: self._use_estar,
                             CONF_BASE_URL: client.base_url,
                         },
@@ -129,20 +140,32 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except HoymilesAuthError as err:
                 _LOGGER.warning("Hoymiles authentication error: %s", err)
                 errors["base"] = "invalid_auth"
+                error_detail = str(err)
             except HoymilesConnectionError as err:
                 _LOGGER.warning("Hoymiles connection error: %s", err)
                 errors["base"] = "cannot_connect"
+                error_detail = str(err)
             except HoymilesError as err:
                 _LOGGER.warning("Hoymiles API error: %s", err)
                 errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
+                error_detail = str(err)
+            except Exception as ex:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected exception in Hoymiles config flow")
                 errors["base"] = "unknown"
+                error_detail = str(ex)
 
         schema = vol.Schema(
             {
                 vol.Required(CONF_USERNAME): str,
                 vol.Required(CONF_PASSWORD): str,
+                vol.Optional(CONF_PROFILE, default=PROFILE_AUTO): vol.In(
+                    [
+                        PROFILE_AUTO,
+                        PROFILE_HOME,
+                        PROFILE_WEB,
+                        PROFILE_INSTALLER,
+                    ]
+                ),
                 vol.Optional(CONF_REGION, default=REGION_AUTO): vol.In(
                     [
                         REGION_AUTO,
@@ -155,7 +178,12 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
 
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="user",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"error_detail": error_detail} if error_detail else None,
+        )
 
     async def async_step_select_station(
         self, user_input: dict[str, Any] | None = None

@@ -77,7 +77,7 @@ async def test_v3_unsalted_login_success(client):
 @pytest.mark.asyncio
 async def test_auto_fallback_to_eu_gateway(client):
     """Test automatic fallback to EU gateway when Global fails."""
-    async def mock_v3(url):
+    async def mock_v3(url, *args, **kwargs):
         if "euapi" in url:
             return "eu_token_789", None
         return None, "Login failed on global"
@@ -89,6 +89,17 @@ async def test_auto_fallback_to_eu_gateway(client):
 
     assert token == "eu_token_789"
     assert "euapi.hoymiles.com" in client.base_url
+
+
+@pytest.mark.asyncio
+async def test_home_profile_headers(client):
+    """Test S-Miles Home mobile client headers."""
+    from custom_components.hoymiles_cloud.const import PROFILE_HOME, PROFILE_WEB
+    headers_home = client._get_headers(PROFILE_HOME)
+    assert "sma/ad" in headers_home["User-Agent"]
+
+    headers_web = client._get_headers(PROFILE_WEB)
+    assert "Mozilla" in headers_web["User-Agent"]
 
 
 @pytest.mark.asyncio

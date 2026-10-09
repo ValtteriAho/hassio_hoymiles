@@ -17,12 +17,24 @@ CONF_BASE_URL: Final = "base_url"
 CONF_REGION: Final = "region"
 CONF_USE_ESTAR: Final = "use_estar"
 CONF_SCAN_INTERVAL: Final = "scan_interval"
+CONF_PROFILE: Final = "profile"
 
 # Region identifiers
 REGION_AUTO: Final = "auto"
 REGION_GLOBAL: Final = "global"
 REGION_EUROPE: Final = "europe"
 REGION_ESTAR: Final = "estar"
+
+# Client Profile identifiers
+PROFILE_AUTO: Final = "auto"
+PROFILE_HOME: Final = "home"
+PROFILE_WEB: Final = "web"
+PROFILE_INSTALLER: Final = "installer"
+
+DEFAULT_HOME_APP_VERSION: Final = "2.10.0"
+HOME_CLIENT_TID: Final = 159
+HOME_CLIENT_DC: Final = 0
+DEFAULT_INSTALLER_APP_VERSION: Final = "3.7.1"
 
 # Defaults & Gateways
 DEFAULT_SCAN_INTERVAL: Final = 480  # 8 minutes (safe for Hoymiles cloud rate limits)

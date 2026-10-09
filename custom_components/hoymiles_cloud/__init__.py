@@ -14,12 +14,14 @@ from .const import (
     CONF_BASE_URL,
     CONF_PLANT_ID,
     CONF_PLANT_NAME,
+    CONF_PROFILE,
     CONF_SCAN_INTERVAL,
     CONF_USE_ESTAR,
     DEFAULT_BASE_URL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     PLATFORMS,
+    PROFILE_AUTO,
 )
 from .coordinator import HoymilesDataUpdateCoordinator
 
@@ -36,6 +38,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     plant_name: str = entry.data.get(CONF_PLANT_NAME, f"Hoymiles Plant {plant_id}")
     use_estar: bool = entry.data.get(CONF_USE_ESTAR, False)
     base_url: str = entry.data.get(CONF_BASE_URL, DEFAULT_BASE_URL)
+    profile: str = entry.data.get(CONF_PROFILE, PROFILE_AUTO)
 
     scan_interval: int = entry.options.get(
         CONF_SCAN_INTERVAL,
@@ -49,6 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session=session,
         base_url=base_url,
         use_estar=use_estar,
+        profile=profile,
     )
 
     coordinator = HoymilesDataUpdateCoordinator(

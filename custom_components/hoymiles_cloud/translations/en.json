@@ -7,6 +7,7 @@
         "data": {
           "username": "Username / Email",
           "password": "Password",
+          "profile": "Account Profile (Auto / S-Miles Home / S-Miles Cloud Web / S-Miles Installer)",
           "region": "Server Region (Auto-detect / Global / Europe / Estar)",
           "plant_id": "Plant / Station ID (optional, auto-detected if empty)"
         }
@@ -20,10 +21,10 @@
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to Hoymiles Cloud API.",
-      "invalid_auth": "Invalid username or password.",
+      "cannot_connect": "Failed to connect to Hoymiles Cloud API: {error_detail}",
+      "invalid_auth": "Authentication failed: {error_detail}",
       "no_stations_found": "No solar plants found associated with this account.",
-      "unknown": "Unexpected error occurred."
+      "unknown": "Unexpected error occurred: {error_detail}"
     },
     "abort": {
       "already_configured": "This plant is already configured."

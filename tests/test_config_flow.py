@@ -67,6 +67,7 @@ async def test_flow_user_invalid_auth():
 
     assert result["type"] == "form"
     assert result["errors"] == {"base": "invalid_auth"}
+    assert result["description_placeholders"] == {"error_detail": "Bad creds"}
 
 
 @pytest.mark.asyncio
