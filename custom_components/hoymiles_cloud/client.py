@@ -53,17 +53,17 @@ ENDPOINT_STATION_PAGE = "pvm/api/0/station/select_by_page"
 
 ENDPOINT_REAL_DATA = {
     "0": "pvm-data/api/0/station/data/count_station_real_data",
-    "1": "pms/v1/station/data/count",
+    "1": "pvm-data/api/0/station/data/count_station_real_data",
 }
 
 ENDPOINT_DEVICE_TREE = {
     "0": "pvm/api/0/station/select_device_of_tree",
-    "1": "pms/v1/station/device/tree",
+    "1": "pvm/api/0/station/select_device_of_tree",
 }
 
 ENDPOINT_MICRO_DETAILS = {
     "0": "pvm/api/0/dev/micro/find",
-    "1": "pms/v1/device/micro/find",
+    "1": "pvm/api/0/dev/micro/find",
 }
 
 HEADER_JSON = {
