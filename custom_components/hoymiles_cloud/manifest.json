@@ -8,5 +8,5 @@
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "requirements": ["argon2-cffi>=23.1.0"],
-  "version": "1.0.4"
+  "version": "1.0.5"
 }
