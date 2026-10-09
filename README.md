@@ -64,3 +64,12 @@ The previous Home Assistant Add-on implementations (Edge, Stable, and OldStable)
 - [`legacy/edge/`](legacy/edge/) — Refactored Python add-on with MQTT publisher.
 - [`legacy/stable/`](legacy/stable/) — Stable version 1.4.x add-on.
 - [`legacy/oldStable/`](legacy/oldStable/) — Original add-on version.
+
+---
+
+## 🙏 Credits & Acknowledgments
+
+This project originated from and was inspired by the work on [**dmslabsbr/hoymiles**](https://github.com/dmslabsbr/hoymiles) by [@dmslabsbr](https://github.com/dmslabsbr) and community contributors. 
+
+While this repository reimagines and evolves the solution from a standalone MQTT add-on into a native Home Assistant custom integration, grateful credit and appreciation go to the original authors for reverse-engineering the Hoymiles cloud API protocols and laying the foundation.
+

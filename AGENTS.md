@@ -1,7 +1,7 @@
 # AGENTS.md — Guidance & Instructions for AI Coding Agents
 
 > **Audience:** AI coding assistants and autonomous developer agents working in this repository.  
-> **Repository:** Hoymiles Solar Cloud Integration for Home Assistant (`Hoymiles_fork`)
+> **Repository:** Hoymiles Solar Cloud Integration for Home Assistant (`hoymiles`)
 
 ---
 
@@ -21,7 +21,7 @@ This repository contains a modern, native **Home Assistant custom integration** 
 
 ### Repository Structure
 ```
-Hoymiles_fork/
+hoymiles/
 ├── custom_components/
 │   └── hoymiles_cloud/          # Core Home Assistant integration
 │       ├── __init__.py          # Integration setup, unload, and entry lifecycle
