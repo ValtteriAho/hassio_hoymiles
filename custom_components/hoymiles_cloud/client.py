@@ -49,6 +49,8 @@ ENDPOINT_STATION_FIND = {
     "1": "pvm/api/0/station/find",
 }
 
+ENDPOINT_STATION_PAGE = "pvm/api/0/station/select_by_page"
+
 ENDPOINT_REAL_DATA = {
     "0": "pvm-data/api/0/station/data/count_station_real_data",
     "1": "pms/v1/station/data/count",
@@ -572,45 +574,91 @@ class HoymilesCloudClient:
         return data
 
 
-    async def async_get_stations(self) -> list[StationSummary]:
-        """Fetch list of solar stations accessible by the account."""
-        endpoint = ENDPOINT_STATION_FIND.get(self.api_version, ENDPOINT_STATION_FIND["0"])
-        # Some accounts use {"id": ""} or empty payload
-        response = await self._request(endpoint, {})
-        data = response.get("data", {})
-
-        stations: list[StationSummary] = []
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = data.get("list", [data]) if "list" in data else [data]
-        else:
-            items = []
-
-        for item in items:
-            if not isinstance(item, dict) or "id" not in item:
-                continue
-            stations.append(
-                StationSummary(
-                    id=int(item["id"]),
-                    name=item.get("station_name") or item.get("name") or f"Plant {item['id']}",
-                    capacity=float(item.get("capacity") or item.get("capacitor") or 0.0),
-                    status=int(item.get("status", 0)),
-                    timezone=str(item.get("timezone") or item.get("tz_name") or ""),
-                    address=str(item.get("address") or item.get("location") or ""),
+    async def async_get_station(self, station_id: int) -> StationSummary | None:
+        """Fetch details for a specific station ID using station/find."""
+        endpoint = ENDPOINT_STATION_FIND.get(
+            self.api_version, ENDPOINT_STATION_FIND["0"]
+        )
+        try:
+            response = await self._request(endpoint, {"id": int(station_id)})
+            data = response.get("data", {})
+            if isinstance(data, dict) and "id" in data:
+                return StationSummary(
+                    id=int(data["id"]),
+                    name=data.get("station_name") or data.get("name") or f"Plant {data['id']}",
+                    capacity=float(data.get("capacity") or data.get("capacitor") or 0.0),
+                    status=int(data.get("status", 0)),
+                    timezone=str(data.get("timezone") or data.get("tz_name") or ""),
+                    address=str(data.get("address") or data.get("location") or ""),
                 )
-            )
+        except Exception as err:
+            _LOGGER.warning("Failed to fetch station details for %s: %s", station_id, err)
+        return None
 
-        return stations
+    async def async_get_stations(
+        self, station_id: int | None = None
+    ) -> list[StationSummary]:
+        """Fetch list of solar stations accessible by the account."""
+        if station_id is not None:
+            station = await self.async_get_station(station_id)
+            return [station] if station else []
+
+        # 1. Try paged station list endpoint (standard Hoymiles API)
+        endpoint = ENDPOINT_STATION_PAGE
+        payloads_to_try = [
+            {"page_size": 100, "page_num": 1},
+            {"page_size": 20, "page": 1},
+            {},
+        ]
+
+        for payload in payloads_to_try:
+            try:
+                response = await self._request(endpoint, payload)
+                data = response.get("data", {})
+
+                items: list[dict[str, Any]] = []
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    items = data.get("list", [])
+                    if not items and "id" in data:
+                        items = [data]
+
+                stations: list[StationSummary] = []
+                for item in items:
+                    if not isinstance(item, dict) or "id" not in item:
+                        continue
+                    stations.append(
+                        StationSummary(
+                            id=int(item["id"]),
+                            name=item.get("station_name") or item.get("name") or f"Plant {item['id']}",
+                            capacity=float(item.get("capacity") or item.get("capacitor") or 0.0),
+                            status=int(item.get("status", 0)),
+                            timezone=str(item.get("timezone") or item.get("tz_name") or ""),
+                            address=str(item.get("address") or item.get("location") or ""),
+                        )
+                    )
+
+                if stations:
+                    return stations
+            except Exception as err:
+                _LOGGER.warning(
+                    "Station discovery attempt on %s with payload %s failed: %s",
+                    endpoint,
+                    payload,
+                    err,
+                )
+
+        return []
 
     async def async_get_real_data(self, station_id: int) -> StationRealData:
         """Fetch real-time metrics for a station."""
         endpoint = ENDPOINT_REAL_DATA.get(self.api_version, ENDPOINT_REAL_DATA["0"])
-        payload = (
-            {"station_id": int(station_id)}
-            if self.api_version == "1"
-            else {"sid": str(station_id)}
-        )
+        payload = {
+            "sid": int(station_id),
+            "station_id": int(station_id),
+            "id": int(station_id),
+        }
 
         response = await self._request(endpoint, payload)
         data = response.get("data", {})
@@ -638,11 +686,11 @@ class HoymilesCloudClient:
     async def async_get_devices(self, station_id: int) -> PlantDevices:
         """Fetch hardware and micro-inverter device tree for a station."""
         endpoint = ENDPOINT_DEVICE_TREE.get(self.api_version, ENDPOINT_DEVICE_TREE["0"])
-        payload = (
-            {"station_id": int(station_id)}
-            if self.api_version == "1"
-            else {"id": str(station_id)}
-        )
+        payload = {
+            "id": int(station_id),
+            "station_id": int(station_id),
+            "sid": int(station_id),
+        }
 
         response = await self._request(endpoint, payload)
         raw_tree = response.get("data", [])
@@ -706,11 +754,12 @@ class HoymilesCloudClient:
         endpoint = ENDPOINT_MICRO_DETAILS.get(
             self.api_version, ENDPOINT_MICRO_DETAILS["0"]
         )
-        payload = (
-            {"station_id": int(station_id)}
-            if self.api_version == "1"
-            else {"id": str(micro_id)}
-        )
+        payload = {
+            "id": int(micro_id),
+            "dev_id": int(micro_id),
+            "station_id": int(station_id),
+            "sid": int(station_id),
+        }
 
         response = await self._request(endpoint, payload)
         data = response.get("data", {})

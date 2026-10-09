@@ -145,6 +145,31 @@ async def test_get_stations(client):
 
 
 @pytest.mark.asyncio
+async def test_get_station_by_id(client):
+    """Test fetching a specific station by ID."""
+    client.token = "valid_token"
+    mock_resp_data = {
+        "status": "0",
+        "data": {
+            "id": 12345,
+            "station_name": "My Solar Roof",
+            "capacity": 2400.0,
+            "status": 1,
+            "timezone": "Europe/Helsinki",
+        },
+    }
+
+    with patch.object(client, "_request", return_value=mock_resp_data):
+        station = await client.async_get_station(12345)
+
+    assert station is not None
+    assert isinstance(station, StationSummary)
+    assert station.id == 12345
+    assert station.name == "My Solar Roof"
+
+
+
+@pytest.mark.asyncio
 async def test_get_real_data(client):
     """Test fetching real-time metrics for a station."""
     client.token = "valid_token"

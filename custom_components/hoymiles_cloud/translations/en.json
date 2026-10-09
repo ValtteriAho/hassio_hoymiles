@@ -23,7 +23,7 @@
     "error": {
       "cannot_connect": "Failed to connect to Hoymiles Cloud API: {error_detail}",
       "invalid_auth": "Authentication failed: {error_detail}",
-      "no_stations_found": "No solar plants found associated with this account.",
+      "no_stations_found": "No solar plants could be auto-discovered. Please enter your Plant ID in the form.",
       "unknown": "Unexpected error occurred: {error_detail}"
     },
     "abort": {
