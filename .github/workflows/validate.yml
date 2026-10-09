@@ -44,8 +44,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio argon2-cffi aiohttp
+          pip install homeassistant pytest pytest-asyncio argon2-cffi aiohttp
 
       - name: Run unit tests
         run: |
-          pytest tests/test_client.py
+          python -m pytest tests/
