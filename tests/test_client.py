@@ -240,6 +240,7 @@ async def test_get_devices(client):
 async def test_token_expiration_retry(client):
     """Test that status 100 triggers re-login and retries request."""
     client.token = "expired_token"
+    client._token_acquired_at = 1000000000.0  # recently acquired so not proactive
 
     mock_resp_expired = AsyncMock()
     mock_resp_expired.status = 200
@@ -266,4 +267,146 @@ async def test_token_expiration_retry(client):
 
     assert res.get("status") == "0"
     assert res.get("data", {}).get("real_power") == 500
+
+
+@pytest.mark.asyncio
+async def test_token_expiration_retry_on_http_403(client):
+    """Test that HTTP 403 Forbidden triggers re-login and retries request."""
+    import time
+    client.token = "expired_token"
+    client._token_acquired_at = time.time()
+
+    mock_resp_forbidden = AsyncMock()
+    mock_resp_forbidden.status = 403
+
+    mock_resp_success = AsyncMock()
+    mock_resp_success.status = 200
+    mock_resp_success.json = AsyncMock(
+        return_value={"status": "0", "data": {"real_power": 300}}
+    )
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.side_effect = [
+        mock_resp_forbidden,
+        mock_resp_success,
+    ]
+    mock_session.closed = False
+    client._session = mock_session
+
+    with patch.object(client, "async_login", AsyncMock(return_value="fresh_token_403")):
+        res = await client._request("test/endpoint", {})
+
+    assert res.get("status") == "0"
+    assert res.get("data", {}).get("real_power") == 300
+
+
+@pytest.mark.asyncio
+async def test_token_expiration_retry_on_user_not_login(client):
+    """Test that status 1 with 'User not login' triggers re-login and retries request."""
+    import time
+    client.token = "expired_token"
+    client._token_acquired_at = time.time()
+
+    mock_resp_not_login = AsyncMock()
+    mock_resp_not_login.status = 200
+    mock_resp_not_login.json = AsyncMock(
+        return_value={"status": "1", "message": "User not login"}
+    )
+
+    mock_resp_success = AsyncMock()
+    mock_resp_success.status = 200
+    mock_resp_success.json = AsyncMock(
+        return_value={"status": "0", "data": {"real_power": 750}}
+    )
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.side_effect = [
+        mock_resp_not_login,
+        mock_resp_success,
+    ]
+    mock_session.closed = False
+    client._session = mock_session
+
+    with patch.object(client, "async_login", AsyncMock(return_value="fresh_token_login")):
+        res = await client._request("test/endpoint", {})
+
+    assert res.get("status") == "0"
+    assert res.get("data", {}).get("real_power") == 750
+
+
+@pytest.mark.asyncio
+async def test_proactive_token_refresh(client):
+    """Test that tokens older than 20 hours are refreshed proactively before request."""
+    client.token = "old_token"
+    client._token_acquired_at = 100.0  # Far in the past
+
+    mock_resp_success = AsyncMock()
+    mock_resp_success.status = 200
+    mock_resp_success.json = AsyncMock(
+        return_value={"status": "0", "data": {"ok": True}}
+    )
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.return_value = mock_resp_success
+    mock_session.closed = False
+    client._session = mock_session
+
+    login_mock = AsyncMock(return_value="refreshed_proactive_token")
+    with patch.object(client, "async_login", login_mock):
+        await client._request("test/endpoint", {})
+
+    login_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_real_data_null_data_payload(client):
+    """Test handling of null data payload without raising AttributeError."""
+    import time
+    client.token = "valid_token"
+    client._token_acquired_at = time.time()
+
+    mock_tree = {
+        "status": "0",
+        "message": "success",
+        "data": None,
+    }
+
+    with patch.object(client, "_request", return_value=mock_tree):
+        real_data = await client.async_get_real_data(12345)
+
+    assert isinstance(real_data, StationRealData)
+    assert real_data.real_power_w == 0.0
+    assert real_data.today_energy_kwh == 0.0
+
+
+@pytest.mark.asyncio
+async def test_transient_http_502_retry(client):
+    """Test that a transient HTTP 502 Bad Gateway retries and succeeds."""
+    import time
+    client.token = "valid_token"
+    client._token_acquired_at = time.time()
+
+    mock_resp_502 = AsyncMock()
+    mock_resp_502.status = 502
+
+    mock_resp_success = AsyncMock()
+    mock_resp_success.status = 200
+    mock_resp_success.json = AsyncMock(
+        return_value={"status": "0", "data": {"recovered": True}}
+    )
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.side_effect = [
+        mock_resp_502,
+        mock_resp_success,
+    ]
+    mock_session.closed = False
+    client._session = mock_session
+
+    with patch("asyncio.sleep", AsyncMock()):
+        res = await client._request("test/endpoint", {})
+
+    assert res.get("status") == "0"
+    assert res.get("data", {}).get("recovered") is True
+
 

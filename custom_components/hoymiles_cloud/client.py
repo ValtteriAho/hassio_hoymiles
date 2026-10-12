@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -74,6 +75,8 @@ HEADER_JSON = {
         " like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ),
 }
+
+TOKEN_MAX_AGE_SECONDS: float = 72000.0  # Proactively refresh token before 24h expiration (20 hours)
 
 
 
@@ -166,6 +169,7 @@ class HoymilesCloudClient:
         self.profile = profile
         self.active_profile = profile
         self.token: str | None = None
+        self._token_acquired_at: float = 0.0
         self.api_version: str = "1"
         self._lock = asyncio.Lock()
 
@@ -440,6 +444,7 @@ class HoymilesCloudClient:
                     token, err = await self._async_v3_login(target_url, profile=prof)
                     if token:
                         self.token = token
+                        self._token_acquired_at = time.time()
                         self.base_url = target_url
                         self.active_profile = prof
                         self.api_version = "1"
@@ -460,6 +465,7 @@ class HoymilesCloudClient:
                     )
                     if token:
                         self.token = token
+                        self._token_acquired_at = time.time()
                         self.base_url = target_url
                         self.active_profile = prof
                         self.api_version = "0"
@@ -490,6 +496,8 @@ class HoymilesCloudClient:
                 if failure_details:
                     best_error = failure_details[0]
 
+            self.token = None
+            self._token_acquired_at = 0.0
             _LOGGER.error(
                 "All Hoymiles authentication attempts failed: %s", failure_details
             )
@@ -499,47 +507,129 @@ class HoymilesCloudClient:
         self,
         endpoint: str,
         payload: dict[str, Any] | None = None,
+        max_retries: int = 2,
     ) -> dict[str, Any]:
-        """Make an authenticated POST request to the API."""
-        if not self.token:
+        """Make an authenticated POST request to the API with retries and auto-reauth."""
+        now = time.time()
+        if not self.token or (now - self._token_acquired_at > TOKEN_MAX_AGE_SECONDS):
             await self.async_login()
 
         url = self.base_url.rstrip("/") + "/" + endpoint.lstrip("/")
         session = await self._get_session()
-        headers = self._get_headers(self.active_profile)
-        if self.token:
-            headers["Authorization"] = self.token
-            headers["token"] = self.token
 
-        try:
-            async with session.post(
-                url,
-                json=payload or {},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                if resp.status == 401:
-                    reauth_needed = True
-                    data = {}
-                elif resp.status != 200:
-                    raise HoymilesConnectionError(
-                        f"HTTP status {resp.status} on {endpoint}"
-                    )
-                else:
-                    data = await resp.json()
-                    status_str = str(data.get("status", "0"))
-                    msg_lower = str(data.get("message", "")).lower()
-                    reauth_needed = status_str in ("100", "101", "102") or ("token" in msg_lower and "expired" in msg_lower)
+        for attempt in range(max_retries + 1):
+            headers = self._get_headers(self.active_profile)
+            if self.token:
+                headers["Authorization"] = self.token
+                headers["token"] = self.token
 
-                if reauth_needed:
-                    _LOGGER.info(
-                        "Token expired or rejected, re-authenticating..."
+            reauth_needed = False
+            reauth_reason = ""
+            data: Any = None
+
+            try:
+                async with session.post(
+                    url,
+                    json=payload or {},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status in (401, 403):
+                        reauth_needed = True
+                        reauth_reason = f"HTTP {resp.status}"
+                    elif resp.status in (500, 502, 503, 504):
+                        if attempt < max_retries:
+                            _LOGGER.warning(
+                                "Transient HTTP %s on %s, retrying in 2s (attempt %s/%s)...",
+                                resp.status,
+                                endpoint,
+                                attempt + 1,
+                                max_retries,
+                            )
+                            await asyncio.sleep(2)
+                            continue
+                        raise HoymilesConnectionError(
+                            f"HTTP status {resp.status} on {endpoint}"
+                        )
+                    elif resp.status != 200:
+                        raise HoymilesConnectionError(
+                            f"HTTP status {resp.status} on {endpoint}"
+                        )
+                    else:
+                        try:
+                            data = await resp.json()
+                        except Exception:
+                            text = await resp.text()
+                            if attempt < max_retries:
+                                _LOGGER.warning(
+                                    "Non-JSON response on %s, retrying in 2s (attempt %s/%s)...",
+                                    endpoint,
+                                    attempt + 1,
+                                    max_retries,
+                                )
+                                await asyncio.sleep(2)
+                                continue
+                            raise HoymilesApiError(
+                                f"Non-JSON response from {endpoint}: {text[:100]}"
+                            )
+
+                        status_str = str(data.get("status", "0"))
+                        msg_lower = str(data.get("message", "")).lower()
+
+                        auth_keywords = (
+                            "token",
+                            "login",
+                            "not login",
+                            "unauthorized",
+                            "forbidden",
+                            "timeout",
+                            "session",
+                            "expired",
+                            "auth fail",
+                        )
+                        if status_str in ("100", "101", "102", "401", "403"):
+                            reauth_needed = True
+                            reauth_reason = f"status {status_str} ({data.get('message')})"
+                        elif status_str != "0" and any(k in msg_lower for k in auth_keywords):
+                            reauth_needed = True
+                            reauth_reason = f"auth message: {data.get('message')}"
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                if attempt < max_retries:
+                    _LOGGER.warning(
+                        "Network error on %s: %s, retrying in 2s (attempt %s/%s)...",
+                        endpoint,
+                        err,
+                        attempt + 1,
+                        max_retries,
                     )
-                    await self.async_login()
-                    headers = self._get_headers(self.active_profile)
-                    if self.token:
-                        headers["Authorization"] = self.token
-                        headers["token"] = self.token
+                    await asyncio.sleep(2)
+                    continue
+                raise HoymilesConnectionError(
+                    f"Connection error on {endpoint}: {err}"
+                ) from err
+            except HoymilesError:
+                raise
+            except Exception as err:
+                raise HoymilesApiError(
+                    f"Unexpected error on {endpoint}: {err}"
+                ) from err
+
+            if reauth_needed:
+                _LOGGER.info(
+                    "Token expired or rejected (%s), re-authenticating...",
+                    reauth_reason,
+                )
+                self.token = None
+                self._token_acquired_at = 0.0
+                await self.async_login()
+
+                headers = self._get_headers(self.active_profile)
+                if self.token:
+                    headers["Authorization"] = self.token
+                    headers["token"] = self.token
+
+                try:
                     async with session.post(
                         url,
                         json=payload or {},
@@ -548,30 +638,26 @@ class HoymilesCloudClient:
                     ) as retry_resp:
                         if retry_resp.status != 200:
                             raise HoymilesConnectionError(
-                                f"HTTP status {retry_resp.status} on {endpoint}"
+                                f"HTTP status {retry_resp.status} on retry of {endpoint}"
                             )
                         data = await retry_resp.json()
-        except aiohttp.ClientError as err:
-            raise HoymilesConnectionError(
-                f"Connection error on {endpoint}: {err}"
-            ) from err
-        except Exception as err:
-            if isinstance(err, HoymilesError):
-                raise
-            raise HoymilesApiError(
-                f"Unexpected error on {endpoint}: {err}"
-            ) from err
+                except aiohttp.ClientError as err:
+                    raise HoymilesConnectionError(
+                        f"Connection error on retry of {endpoint}: {err}"
+                    ) from err
 
-        if not isinstance(data, dict):
-            raise HoymilesApiError(
-                f"Malformed response on {endpoint}: expected JSON object"
-            )
+            if not isinstance(data, dict):
+                raise HoymilesApiError(
+                    f"Malformed response on {endpoint}: expected JSON object"
+                )
 
-        if str(data.get("status")) != "0":
-            msg = data.get("message") or f"API error status {data.get('status')}"
-            raise HoymilesApiError(f"Error on {endpoint}: {msg}")
+            if str(data.get("status")) != "0":
+                msg = data.get("message") or f"API error status {data.get('status')}"
+                raise HoymilesApiError(f"Error on {endpoint}: {msg}")
 
-        return data
+            return data
+
+        raise HoymilesConnectionError(f"Request failed after {max_retries} retries: {endpoint}")
 
 
     async def async_get_station(self, station_id: int) -> StationSummary | None:
@@ -661,7 +747,8 @@ class HoymilesCloudClient:
         }
 
         response = await self._request(endpoint, payload)
-        data = response.get("data", {})
+        raw_data = response.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
 
         real_power = float(data.get("real_power") or 0.0)
         today_eq = float(data.get("today_eq") or 0.0)
@@ -693,7 +780,8 @@ class HoymilesCloudClient:
         }
 
         response = await self._request(endpoint, payload)
-        raw_tree = response.get("data", [])
+        raw_tree_data = response.get("data")
+        raw_tree = raw_tree_data if isinstance(raw_tree_data, list) else []
 
         micro_inverters: list[MicroInverterInfo] = []
         self._parse_device_tree_items(raw_tree, micro_inverters)
@@ -762,14 +850,16 @@ class HoymilesCloudClient:
         }
 
         response = await self._request(endpoint, payload)
-        data = response.get("data", {})
+        raw_data = response.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
 
         connected = bool(data.get("net_state", 1))
-        warn_list = data.get("warn_list", [])
+        raw_warn = data.get("warn_list")
+        warn_list = raw_warn if isinstance(raw_warn, list) else []
 
         alarm_code = 0
         alarm_message = ""
-        if isinstance(warn_list, list) and warn_list:
+        if warn_list:
             first_warn = warn_list[0]
             if isinstance(first_warn, dict):
                 alarm_code = int(first_warn.get("err_code", 0))
