@@ -147,3 +147,7 @@ my.json
 .vscode/*
 edge/local_run.sh
 *.xml
+
+# AI Agent guidance
+AGENTS.md
+agents.md
