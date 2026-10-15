@@ -12,6 +12,8 @@ A modern, native Home Assistant custom integration (HACS) to monitor your **Hoym
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/default)
 [![GitHub release](https://img.shields.io/github/v/release/ValtteriAho/hassio_hoymiles?include_prereleases)](https://github.com/ValtteriAho/hassio_hoymiles/releases)
 [![License](https://img.shields.io/github/license/ValtteriAho/hassio_hoymiles)](LICENSE)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-yellow.svg?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/valtteriah0)
+[![Donate PayPal](https://img.shields.io/badge/Donate-PayPal-00457C.svg?logo=paypal&logoColor=white)](https://paypal.me/valtteriah0)
 
 ---
 
