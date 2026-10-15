@@ -74,6 +74,19 @@ The previous Home Assistant Add-on implementations (Edge, Stable, and OldStable)
 
 ---
 
+## ☕ Support Ongoing Development
+
+This integration is completely free and open source. Maintaining cloud integrations requires ongoing effort: reverse-engineering manufacturer cloud API changes (such as Hoymiles' Argon2 security updates), testing compatibility across micro-inverter and DTU models, and adapting to monthly Home Assistant Core updates.
+
+If this integration helps you monitor your solar generation and brings value to your smart home, consider supporting its continued development:
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/valtteriah0)
+[![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/valtteriah0)
+
+*Every coffee or donation is deeply appreciated and directly helps support continued maintenance and improvements!*
+
+---
+
 ## 🙏 Credits & Acknowledgments
 
 This project originated from and was inspired by the work on [**dmslabsbr/hoymiles**](https://github.com/dmslabsbr/hoymiles) by [@dmslabsbr](https://github.com/dmslabsbr) and community contributors. 
