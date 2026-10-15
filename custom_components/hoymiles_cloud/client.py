@@ -751,12 +751,21 @@ class HoymilesCloudClient:
         data = raw_data if isinstance(raw_data, dict) else {}
 
         real_power = float(data.get("real_power") or 0.0)
-        today_eq = float(data.get("today_eq") or 0.0)
-        month_eq = float(data.get("month_eq") or 0.0)
-        total_eq = float(data.get("total_eq") or 0.0)
-        co2 = float(data.get("co2_emission_reduction") or data.get("co2_emission") or 0.0)
+        raw_today_eq = float(data.get("today_eq") or 0.0)
+        raw_month_eq = float(data.get("month_eq") or 0.0)
+        raw_total_eq = float(data.get("total_eq") or 0.0)
+        raw_co2 = float(data.get("co2_emission_reduction") or data.get("co2_emission") or 0.0)
         tree = float(data.get("plant_tree") or data.get("tree_planted") or 0.0)
         data_time = str(data.get("data_time") or data.get("last_data_time") or "")
+
+        # Hoymiles S-Miles API returns energy metrics in Watt-hours (Wh).
+        # Convert Wh -> kWh (divide by 1000) for Home Assistant Energy Dashboard:
+        today_eq = round(raw_today_eq / 1000.0, 3)
+        month_eq = round(raw_month_eq / 1000.0, 3)
+        total_eq = round(raw_total_eq / 1000.0, 3)
+
+        # CO2 reduction: API returns grams (g) when > 1000; convert g -> kg
+        co2 = round(raw_co2 / 1000.0, 2) if raw_co2 > 1000.0 else round(raw_co2, 2)
 
         return StationRealData(
             station_id=int(station_id),
