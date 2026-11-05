@@ -91,3 +91,113 @@ async def test_flow_user_connection_error():
     assert result["type"] == "form"
     assert result["errors"] == {"base": "cannot_connect"}
 
+
+@pytest.mark.asyncio
+async def test_reauth_flow_success():
+    """Test successful re-authentication flow."""
+    from custom_components.hoymiles_cloud.config_flow import HoymilesCloudConfigFlow
+    from custom_components.hoymiles_cloud.const import (
+        CONF_BASE_URL,
+        CONF_PLANT_ID,
+        CONF_PLANT_NAME,
+        CONF_PROFILE,
+        CONF_USE_ESTAR,
+    )
+    from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+    from unittest.mock import MagicMock
+
+    flow = HoymilesCloudConfigFlow()
+    flow.hass = AsyncMock()
+
+    mock_entry = MagicMock()
+    mock_entry.data = {
+        CONF_USERNAME: "user@example.com",
+        CONF_PASSWORD: "old_password",
+        CONF_PLANT_ID: 777,
+        CONF_PLANT_NAME: "Home Solar",
+        CONF_USE_ESTAR: False,
+        CONF_BASE_URL: "https://global.api.hoymiles.com",
+        CONF_PROFILE: "auto",
+    }
+
+    with patch.object(flow, "_get_reauth_entry", return_value=mock_entry), patch(
+        "custom_components.hoymiles_cloud.config_flow.async_get_clientsession"
+    ), patch(
+        "custom_components.hoymiles_cloud.client.HoymilesCloudClient.async_login",
+        AsyncMock(return_value="new_token"),
+    ), patch.object(
+        flow,
+        "async_update_reload_and_abort",
+        return_value={"type": "abort", "reason": "reauth_successful"},
+    ) as mock_abort:
+        reauth_result = await flow.async_step_reauth({})
+        assert reauth_result["type"] == "form"
+        assert reauth_result["step_id"] == "reauth_confirm"
+
+        confirm_result = await flow.async_step_reauth_confirm({CONF_PASSWORD: "new_password"})
+
+        assert confirm_result["type"] == "abort"
+        assert confirm_result["reason"] == "reauth_successful"
+        mock_abort.assert_called_once()
+        _, kwargs = mock_abort.call_args
+        assert kwargs["data_updates"][CONF_PASSWORD] == "new_password"
+
+
+@pytest.mark.asyncio
+async def test_reauth_flow_invalid_auth():
+    """Test invalid credentials during re-authentication."""
+    from custom_components.hoymiles_cloud.config_flow import HoymilesCloudConfigFlow
+    from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+    from unittest.mock import MagicMock
+
+    flow = HoymilesCloudConfigFlow()
+    flow.hass = AsyncMock()
+
+    mock_entry = MagicMock()
+    mock_entry.data = {
+        CONF_USERNAME: "user@example.com",
+        CONF_PASSWORD: "old_password",
+    }
+
+    with patch.object(flow, "_get_reauth_entry", return_value=mock_entry), patch(
+        "custom_components.hoymiles_cloud.config_flow.async_get_clientsession"
+    ), patch(
+        "custom_components.hoymiles_cloud.client.HoymilesCloudClient.async_login",
+        AsyncMock(side_effect=HoymilesAuthError("Password incorrect")),
+    ):
+        result = await flow.async_step_reauth_confirm({CONF_PASSWORD: "wrong_password"})
+
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "invalid_auth"}
+    assert result["description_placeholders"]["error_detail"] == "Password incorrect"
+
+
+@pytest.mark.asyncio
+async def test_options_flow():
+    """Test options flow initialization and update."""
+    from custom_components.hoymiles_cloud.config_flow import (
+        HoymilesCloudConfigFlow,
+        HoymilesCloudOptionsFlow,
+    )
+    from custom_components.hoymiles_cloud.const import CONF_SCAN_INTERVAL
+    from unittest.mock import MagicMock
+
+    mock_entry = MagicMock()
+    mock_entry.options = {CONF_SCAN_INTERVAL: 480}
+    mock_entry.data = {}
+
+    options_flow = HoymilesCloudConfigFlow.async_get_options_flow(mock_entry)
+    assert isinstance(options_flow, HoymilesCloudOptionsFlow)
+
+    # Attach mock entry to options flow for testing
+    options_flow._config_entry = mock_entry
+
+    form_result = await options_flow.async_step_init()
+    assert form_result["type"] == "form"
+    assert form_result["step_id"] == "init"
+
+    submit_result = await options_flow.async_step_init({CONF_SCAN_INTERVAL: 600})
+    assert submit_result["type"] == "create_entry"
+    assert submit_result["data"] == {CONF_SCAN_INTERVAL: 600}
+
+

@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import (
@@ -113,7 +114,7 @@ class HoymilesDataUpdateCoordinator(DataUpdateCoordinator[HoymilesCoordinatorDat
             )
 
         except HoymilesAuthError as err:
-            raise UpdateFailed(f"Authentication failure: {err}") from err
+            raise ConfigEntryAuthFailed(f"Authentication failure: {err}") from err
         except HoymilesConnectionError as err:
             raise UpdateFailed(f"Connection failure communicating with cloud: {err}") from err
         except HoymilesError as err:

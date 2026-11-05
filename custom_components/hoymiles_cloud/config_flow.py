@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -221,21 +222,83 @@ class HoymilesCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="select_station", data_schema=schema, errors=errors
         )
 
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> FlowResult:
+        """Handle initiation of re-authentication upon auth failure."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle re-authentication confirm step."""
+        errors: dict[str, str] = {}
+        error_detail: str | None = None
+        reauth_entry = self._get_reauth_entry()
+
+        if user_input is not None:
+            new_password = user_input[CONF_PASSWORD].strip()
+            session = async_get_clientsession(self.hass)
+            client = HoymilesCloudClient(
+                username=reauth_entry.data[CONF_USERNAME],
+                password=new_password,
+                session=session,
+                base_url=reauth_entry.data.get(CONF_BASE_URL, DEFAULT_BASE_URL),
+                use_estar=reauth_entry.data.get(CONF_USE_ESTAR, False),
+                profile=reauth_entry.data.get(CONF_PROFILE, PROFILE_AUTO),
+            )
+
+            try:
+                await client.async_login()
+                return self.async_update_reload_and_abort(
+                    reauth_entry,
+                    data_updates={
+                        CONF_PASSWORD: new_password,
+                        CONF_BASE_URL: client.base_url,
+                        CONF_PROFILE: client.active_profile,
+                    },
+                )
+            except HoymilesAuthError as err:
+                _LOGGER.warning("Hoymiles re-auth authentication error: %s", err)
+                errors["base"] = "invalid_auth"
+                error_detail = str(err)
+            except HoymilesConnectionError as err:
+                _LOGGER.warning("Hoymiles re-auth connection error: %s", err)
+                errors["base"] = "cannot_connect"
+                error_detail = str(err)
+            except HoymilesError as err:
+                _LOGGER.warning("Hoymiles re-auth API error: %s", err)
+                errors["base"] = "cannot_connect"
+                error_detail = str(err)
+            except Exception as ex:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected exception in Hoymiles re-auth flow")
+                errors["base"] = "unknown"
+                error_detail = str(ex)
+
+        schema = vol.Schema({vol.Required(CONF_PASSWORD): str})
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                CONF_USERNAME: reauth_entry.data[CONF_USERNAME],
+                "error_detail": error_detail,
+            }
+            if error_detail
+            else {CONF_USERNAME: reauth_entry.data[CONF_USERNAME]},
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> HoymilesCloudOptionsFlow:
         """Get the options flow for this handler."""
-        return HoymilesCloudOptionsFlow(config_entry)
+        return HoymilesCloudOptionsFlow()
 
 
 class HoymilesCloudOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for Hoymiles Solar Cloud."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

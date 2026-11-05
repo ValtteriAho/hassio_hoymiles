@@ -96,6 +96,43 @@ class HoymilesApiError(HoymilesError):
     """API responded with an unexpected error payload."""
 
 
+def _is_credential_rejection(err: str | None) -> bool:
+    """Return True if the error indicates explicit credential rejection."""
+    if not err:
+        return False
+    msg = err.lower()
+    return any(
+        k in msg
+        for k in (
+            "password",
+            "credential",
+            "account locked",
+            "account is locked",
+            "user name or password",
+            "username or password",
+            "account or password",
+        )
+    )
+
+
+def _is_user_not_found(err: str | None) -> bool:
+    """Return True if the error indicates user or account does not exist."""
+    if not err:
+        return False
+    msg = err.lower()
+    return any(
+        k in msg
+        for k in (
+            "user not exist",
+            "user does not exist",
+            "user not found",
+            "account not exist",
+            "account does not exist",
+            "account not found",
+        )
+    )
+
+
 @dataclass
 class StationSummary:
     """Summary information for a Hoymiles solar station/plant."""
@@ -341,8 +378,12 @@ class HoymilesCloudClient:
                     profile,
                     login_err,
                 )
+                # When the server returned an Argon2 salt, it uses Argon2.
+                # Do not try unsalted browser formats or legacy hashes.
+                return None, login_err
             except Exception as ex:
                 _LOGGER.debug("Argon2 challenge computation failed: %s", ex)
+                return None, f"Argon2 computation failed: {ex}"
 
         # Case 2: Salt is empty/null or Argon2 not available -> Try unsalted browser formats
         md5_hex = hashlib.md5(self.password.encode("utf-8")).hexdigest()
@@ -380,6 +421,8 @@ class HoymilesCloudClient:
                 )
                 return token, None
             last_error = login_err or last_error
+            if _is_credential_rejection(login_err):
+                return None, login_err
 
         return None, last_error
 
@@ -434,6 +477,7 @@ class HoymilesCloudClient:
 
             for prof in profiles_to_try:
                 for target_url in urls_to_try:
+                    is_last_gateway = target_url == urls_to_try[-1]
                     _LOGGER.info(
                         "Attempting Hoymiles authentication against %s (profile: %s)",
                         target_url,
@@ -459,26 +503,64 @@ class HoymilesCloudClient:
                         _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
                         failure_details.append(msg)
 
-                    # 2. Try legacy v0 MD5 login as fallback
-                    token, err_leg = await self._async_legacy_login(
-                        target_url, profile=prof
-                    )
-                    if token:
-                        self.token = token
-                        self._token_acquired_at = time.time()
-                        self.base_url = target_url
-                        self.active_profile = prof
-                        self.api_version = "0"
-                        _LOGGER.info(
-                            "Authenticated successfully on %s with profile '%s' (legacy v0)",
-                            target_url,
-                            prof,
+                        # If server clearly rejected credentials (wrong password / lockout),
+                        # stop trying further profiles and gateways immediately.
+                        if _is_credential_rejection(err):
+                            self.token = None
+                            self._token_acquired_at = 0.0
+                            _LOGGER.error(
+                                "Hoymiles credentials rejected on %s: %s",
+                                target_url,
+                                err,
+                            )
+                            raise HoymilesAuthError(err)
+
+                        # If user does not exist on any gateway, stop trying further profiles.
+                        if is_last_gateway and _is_user_not_found(err):
+                            self.token = None
+                            self._token_acquired_at = 0.0
+                            _LOGGER.error(
+                                "Hoymiles user '%s' not found on configured gateways",
+                                self.username,
+                            )
+                            raise HoymilesAuthError(err)
+
+                    # 2. Try legacy v0 MD5 login as fallback (unless user does not exist)
+                    if not _is_user_not_found(err):
+                        token, err_leg = await self._async_legacy_login(
+                            target_url, profile=prof
                         )
-                        return token
-                    if err_leg:
-                        msg = f"[{prof} @ {target_url}] legacy: {err_leg}"
-                        _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
-                        failure_details.append(msg)
+                        if token:
+                            self.token = token
+                            self._token_acquired_at = time.time()
+                            self.base_url = target_url
+                            self.active_profile = prof
+                            self.api_version = "0"
+                            _LOGGER.info(
+                                "Authenticated successfully on %s with profile '%s' (legacy v0)",
+                                target_url,
+                                prof,
+                            )
+                            return token
+                        if err_leg:
+                            msg = f"[{prof} @ {target_url}] legacy: {err_leg}"
+                            _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
+                            failure_details.append(msg)
+
+                            if _is_credential_rejection(err_leg):
+                                self.token = None
+                                self._token_acquired_at = 0.0
+                                _LOGGER.error(
+                                    "Hoymiles legacy auth rejected credentials on %s: %s",
+                                    target_url,
+                                    err_leg,
+                                )
+                                raise HoymilesAuthError(err_leg)
+
+                            if is_last_gateway and _is_user_not_found(err_leg):
+                                self.token = None
+                                self._token_acquired_at = 0.0
+                                raise HoymilesAuthError(err_leg)
 
             # Choose the most specific error message to present to user
             best_error = "Invalid username or password"
@@ -653,6 +735,12 @@ class HoymilesCloudClient:
 
             if str(data.get("status")) != "0":
                 msg = data.get("message") or f"API error status {data.get('status')}"
+                status_str = str(data.get("status"))
+                msg_lower = msg.lower()
+                if status_str in ("100", "101", "102", "401", "403") or any(
+                    k in msg_lower for k in ("unauthorized", "not login", "auth fail")
+                ):
+                    raise HoymilesAuthError(f"Authentication failed on {endpoint}: {msg}")
                 raise HoymilesApiError(f"Error on {endpoint}: {msg}")
 
             return data

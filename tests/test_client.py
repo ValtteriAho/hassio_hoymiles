@@ -114,6 +114,44 @@ async def test_login_failure_raises_auth_error(client):
             await client.async_login()
 
 
+@pytest.mark.asyncio
+async def test_login_stops_immediately_on_password_rejection(client):
+    """Test that login halts immediately when credentials are rejected."""
+    mock_v3 = AsyncMock(return_value=(None, "User name or password error"))
+    mock_legacy = AsyncMock(return_value=(None, "Legacy error"))
+
+    with patch.object(client, "_async_v3_login", mock_v3), patch.object(
+        client, "_async_legacy_login", mock_legacy
+    ):
+        with pytest.raises(HoymilesAuthError) as exc_info:
+            await client.async_login()
+
+    # Must be called only ONCE, legacy login must not be called, no other profiles/gateways tried
+    assert mock_v3.call_count == 1
+    assert mock_legacy.call_count == 0
+    assert "User name or password error" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_v3_salted_failure_does_not_try_unsalted_variants(client):
+    """Test that salted Argon2 failure does not try unsalted browser formats."""
+    mock_attempt = AsyncMock(return_value=(None, "Password error"))
+
+    with patch("custom_components.hoymiles_cloud.client.ARGON2_AVAILABLE", True), patch.object(
+        client, "_pre_inspect_v3", AsyncMock(return_value=("nonce123", "aabbcc", None))
+    ), patch.object(
+        client, "_async_argon_compute_challenge", AsyncMock(return_value="computed_challenge_hash")
+    ), patch.object(
+        client, "_login_v3_attempt", mock_attempt
+    ):
+        token, err = await client._async_v3_login("https://api.hoymiles.com")
+
+    assert token is None
+    assert err == "Password error"
+    # Should only attempt Argon2 once, and NOT try composite/sha256/md5 unsalted variants
+    assert mock_attempt.call_count == 1
+
+
 
 @pytest.mark.asyncio
 async def test_get_stations(client):

@@ -18,6 +18,13 @@
         "data": {
           "plant_id": "Solar Plant"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate with Hoymiles S-Miles Cloud",
+        "description": "Please enter your updated password for {username}.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -27,7 +34,8 @@
       "unknown": "Unexpected error occurred: {error_detail}"
     },
     "abort": {
-      "already_configured": "This plant is already configured."
+      "already_configured": "This plant is already configured.",
+      "reauth_successful": "Re-authentication was successful."
     }
   },
   "options": {
