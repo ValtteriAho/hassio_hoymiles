@@ -279,41 +279,101 @@ class HoymilesCloudClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _compute)
 
-    async def _pre_inspect_v3(
-        self, base_url: str, profile: str | None = None
-    ) -> tuple[str | None, str | None, str | None]:
-        """Run pre-inspect on the target base URL.
+    def _record_login_success(
+        self, token: str, base_url: str, profile: str, api_version: str
+    ) -> str:
+        """Store authentication state after a successful login."""
+        self.token = token
+        self._token_acquired_at = time.time()
+        self.base_url = base_url
+        self.active_profile = profile
+        self.api_version = api_version
+        label = "v3" if api_version == "1" else "legacy v0"
+        _LOGGER.info(
+            "Authenticated successfully on %s with profile '%s' (%s)",
+            base_url,
+            profile,
+            label,
+        )
+        return token
 
-        Returns (nonce, salt, error_message).
+    async def _post_auth_json(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        profile: str | None,
+        context: str,
+    ) -> dict[str, Any]:
+        """POST JSON to an auth endpoint and return parsed JSON object.
+
+        Raises HoymilesConnectionError on network errors, timeouts, non-200 HTTP
+        statuses, or non-JSON/non-object responses.
         """
-        url = base_url.rstrip("/") + "/" + ARGON_PRE_INSP_API
         session = await self._get_session()
         headers = self._get_headers(profile)
 
         try:
             async with session.post(
                 url,
-                json={"u": self.username},
+                json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
-                    return None, None, f"HTTP status {resp.status} on pre-inspect ({base_url})"
+                    raise HoymilesConnectionError(
+                        f"HTTP status {resp.status} on {context} ({url})"
+                    )
                 try:
                     data = await resp.json()
-                except Exception:
-                    text = await resp.text()
-                    return None, None, f"Non-JSON response from {base_url}: {text[:80]}"
+                except Exception as err:
+                    try:
+                        text = await resp.text()
+                    except Exception:
+                        text = str(err)
+                    raise HoymilesConnectionError(
+                        f"Non-JSON response from {url}: {text[:80]}"
+                    ) from err
+        except HoymilesConnectionError:
+            raise
         except Exception as err:
-            return None, None, f"Network error contacting {base_url}: {err}"
+            raise HoymilesConnectionError(
+                f"Network error contacting {url}: {err}"
+            ) from err
+
+        if not isinstance(data, dict):
+            raise HoymilesConnectionError(
+                f"Unexpected non-object JSON response from {url}"
+            )
+        return data
+
+    async def _pre_inspect_v3(
+        self, base_url: str, profile: str | None = None
+    ) -> tuple[str | None, str | None, str | None]:
+        """Run pre-inspect on the target base URL.
+
+        Returns (nonce, salt, error_message).
+        Raises HoymilesConnectionError on transport, HTTP status, or non-JSON failures.
+        """
+        url = base_url.rstrip("/") + "/" + ARGON_PRE_INSP_API
+        data = await self._post_auth_json(
+            url, {"u": self.username}, profile, "pre-inspect"
+        )
 
         if str(data.get("status")) != "0":
             msg = data.get("message") or f"Pre-inspect returned status {data.get('status')}"
             return None, None, msg
 
-        insp_data = data.get("data", {})
+        insp_data = data.get("data")
+        if not isinstance(insp_data, dict):
+            raise HoymilesConnectionError(
+                f"Malformed pre-inspect data payload from {base_url}"
+            )
         nonce = insp_data.get("n")
         salt = insp_data.get("a")
+        if not nonce:
+            raise HoymilesConnectionError(
+                f"Missing pre-inspection nonce from {base_url}"
+            )
         return nonce, salt, None
 
     async def _login_v3_attempt(
@@ -322,31 +382,17 @@ class HoymilesCloudClient:
         """Attempt a single v3 login request.
 
         Returns (token, error_message).
+        Raises HoymilesConnectionError on transport, HTTP status, or non-JSON failures.
         """
         login_url = base_url.rstrip("/") + "/" + ARGON_LOGIN_API
-        session = await self._get_session()
         login_payload = {"u": self.username, "ch": credential_hash, "n": nonce}
-        headers = self._get_headers(profile)
-
-        try:
-            async with session.post(
-                login_url,
-                json=login_payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    return None, f"HTTP status {resp.status} on login ({login_url})"
-                try:
-                    login_data = await resp.json()
-                except Exception:
-                    text = await resp.text()
-                    return None, f"Non-JSON response from {base_url}: {text[:80]}"
-        except Exception as err:
-            return None, f"Network error contacting {login_url}: {err}"
+        login_data = await self._post_auth_json(
+            login_url, login_payload, profile, "login"
+        )
 
         if str(login_data.get("status")) == "0":
-            token = login_data.get("data", {}).get("token", "")
+            token_data = login_data.get("data")
+            token = token_data.get("token", "") if isinstance(token_data, dict) else ""
             if token:
                 return token, None
 
@@ -367,23 +413,26 @@ class HoymilesCloudClient:
             try:
                 salt_bytes = self._decode_v3_salt(salt_str)
                 ch = await self._async_argon_compute_challenge(salt_bytes)
-                token, login_err = await self._login_v3_attempt(
-                    base_url, ch, nonce, profile=profile
-                )
-                if token:
-                    return token, None
-                _LOGGER.debug(
-                    "Argon2 salted login failed on %s (profile %s): %s",
-                    base_url,
-                    profile,
-                    login_err,
-                )
-                # When the server returned an Argon2 salt, it uses Argon2.
-                # Do not try unsalted browser formats or legacy hashes.
-                return None, login_err
             except Exception as ex:
                 _LOGGER.debug("Argon2 challenge computation failed: %s", ex)
-                return None, f"Argon2 computation failed: {ex}"
+                raise HoymilesApiError(
+                    f"Argon2 challenge computation failed: {ex}"
+                ) from ex
+
+            token, login_err = await self._login_v3_attempt(
+                base_url, ch, nonce, profile=profile
+            )
+            if token:
+                return token, None
+            _LOGGER.debug(
+                "Argon2 salted login failed on %s (profile %s): %s",
+                base_url,
+                profile,
+                login_err,
+            )
+            # When the server returned an Argon2 salt, it uses Argon2.
+            # Do not try unsalted browser formats or legacy hashes.
+            return None, login_err
 
         # Case 2: Salt is empty/null or Argon2 not available -> Try unsalted browser formats
         md5_hex = hashlib.md5(self.password.encode("utf-8")).hexdigest()
@@ -406,6 +455,11 @@ class HoymilesCloudClient:
                     base_url, profile=profile
                 )
                 if not retry_nonce:
+                    last_error = retry_err or last_error
+                    if _is_credential_rejection(retry_err) or _is_user_not_found(
+                        retry_err
+                    ):
+                        return None, retry_err
                     continue
                 nonce = retry_nonce
 
@@ -429,31 +483,28 @@ class HoymilesCloudClient:
     async def _async_legacy_login(
         self, base_url: str, profile: str | None = None
     ) -> tuple[str | None, str | None]:
-        """Execute legacy MD5 authentication."""
+        """Execute legacy MD5 authentication.
+
+        Returns (token, error_message).
+        Raises HoymilesConnectionError on transport, HTTP status, or non-JSON failures.
+        """
         pass_hash = hashlib.md5(self.password.encode("utf-8")).hexdigest()
         url = base_url.rstrip("/") + "/" + LEGACY_LOGIN_API
-        session = await self._get_session()
-        headers = self._get_headers(profile)
-
         payload = {
             "password": pass_hash,
             "user_name": self.username,
         }
-        try:
-            async with session.post(
-                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
-                    return None, f"HTTP status {resp.status}"
-                data = await resp.json()
-        except Exception as err:
-            return None, str(err)
+        data = await self._post_auth_json(url, payload, profile, "legacy login")
 
         if str(data.get("status")) != "0":
             return None, data.get("message") or "Legacy login failed"
 
-        token_data = data.get("data", {})
+        token_data = data.get("data")
+        if not isinstance(token_data, dict):
+            return None, "Legacy login failed"
         token = token_data.get("token") or token_data.get("estar_token")
+        if not token:
+            return None, data.get("message") or "Legacy login failed"
         return token, None
 
     async def async_login(self) -> str:
@@ -473,9 +524,16 @@ class HoymilesCloudClient:
                 elif self.base_url.rstrip("/") == API_EU_BASE_URL.rstrip("/"):
                     urls_to_try.append(DEFAULT_BASE_URL)
 
+            primary_url = urls_to_try[0]
             failure_details: list[str] = []
+            auth_failure_details: list[str] = []
+            primary_auth_errors: list[str] = []
+            connection_errors: list[str] = []
+            primary_all_profiles_reached = True
+            any_gateway_unreachable = False
 
             for prof in profiles_to_try:
+                prof_had_conn_error = False
                 for target_url in urls_to_try:
                     is_last_gateway = target_url == urls_to_try[-1]
                     _LOGGER.info(
@@ -484,87 +542,148 @@ class HoymilesCloudClient:
                         prof,
                     )
 
+                    v3_conn_err: HoymilesConnectionError | None = None
+                    err: str | None = None
+
                     # 1. Try modern v3 login (salted Argon2 and unsalted candidates)
-                    token, err = await self._async_v3_login(target_url, profile=prof)
-                    if token:
-                        self.token = token
-                        self._token_acquired_at = time.time()
-                        self.base_url = target_url
-                        self.active_profile = prof
-                        self.api_version = "1"
-                        _LOGGER.info(
-                            "Authenticated successfully on %s with profile '%s' (v3)",
-                            target_url,
-                            prof,
-                        )
-                        return token
-                    if err:
-                        msg = f"[{prof} @ {target_url}] v3: {err}"
+                    try:
+                        token, err = await self._async_v3_login(target_url, profile=prof)
+                    except HoymilesConnectionError as conn_err:
+                        v3_conn_err = conn_err
+                        msg = f"[{prof} @ {target_url}] v3: {conn_err}"
                         _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
                         failure_details.append(msg)
-
-                        # If server clearly rejected credentials (wrong password / lockout),
-                        # stop trying further profiles and gateways immediately.
-                        if _is_credential_rejection(err):
-                            self.token = None
-                            self._token_acquired_at = 0.0
-                            _LOGGER.error(
-                                "Hoymiles credentials rejected on %s: %s",
-                                target_url,
-                                err,
-                            )
-                            raise HoymilesAuthError(err)
-
-                        # If user does not exist on any gateway, stop trying further profiles.
-                        if is_last_gateway and _is_user_not_found(err):
-                            self.token = None
-                            self._token_acquired_at = 0.0
-                            _LOGGER.error(
-                                "Hoymiles user '%s' not found on configured gateways",
-                                self.username,
-                            )
-                            raise HoymilesAuthError(err)
-
-                    # 2. Try legacy v0 MD5 login as fallback (unless user does not exist)
-                    if not _is_user_not_found(err):
-                        token, err_leg = await self._async_legacy_login(
-                            target_url, profile=prof
-                        )
+                        connection_errors.append(str(conn_err))
+                    else:
                         if token:
-                            self.token = token
-                            self._token_acquired_at = time.time()
-                            self.base_url = target_url
-                            self.active_profile = prof
-                            self.api_version = "0"
-                            _LOGGER.info(
-                                "Authenticated successfully on %s with profile '%s' (legacy v0)",
-                                target_url,
-                                prof,
+                            return self._record_login_success(
+                                token, target_url, prof, "1"
                             )
-                            return token
-                        if err_leg:
-                            msg = f"[{prof} @ {target_url}] legacy: {err_leg}"
+                        if err:
+                            msg = f"[{prof} @ {target_url}] v3: {err}"
                             _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
                             failure_details.append(msg)
+                            auth_failure_details.append(msg)
+                            if target_url == primary_url:
+                                primary_auth_errors.append(err)
 
-                            if _is_credential_rejection(err_leg):
+                            # If server clearly rejected credentials (wrong password / lockout),
+                            # stop trying further profiles and gateways immediately.
+                            if _is_credential_rejection(err):
                                 self.token = None
                                 self._token_acquired_at = 0.0
                                 _LOGGER.error(
-                                    "Hoymiles legacy auth rejected credentials on %s: %s",
+                                    "Hoymiles credentials rejected on %s: %s",
                                     target_url,
-                                    err_leg,
+                                    err,
                                 )
-                                raise HoymilesAuthError(err_leg)
+                                raise HoymilesAuthError(err)
 
-                            if is_last_gateway and _is_user_not_found(err_leg):
+                            # If user does not exist on any gateway (and all earlier gateways were reached),
+                            # stop trying further profiles.
+                            if (
+                                is_last_gateway
+                                and not prof_had_conn_error
+                                and _is_user_not_found(err)
+                            ):
                                 self.token = None
                                 self._token_acquired_at = 0.0
-                                raise HoymilesAuthError(err_leg)
+                                _LOGGER.error(
+                                    "Hoymiles user '%s' not found on configured gateways",
+                                    self.username,
+                                )
+                                raise HoymilesAuthError(err)
+
+                    # 2. Try legacy v0 MD5 login as fallback (unless user does not exist)
+                    leg_conn_err: HoymilesConnectionError | None = None
+                    err_leg: str | None = None
+                    if not _is_user_not_found(err):
+                        try:
+                            token, err_leg = await self._async_legacy_login(
+                                target_url, profile=prof
+                            )
+                        except HoymilesConnectionError as conn_err:
+                            leg_conn_err = conn_err
+                            msg = f"[{prof} @ {target_url}] legacy: {conn_err}"
+                            _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
+                            failure_details.append(msg)
+                            connection_errors.append(str(conn_err))
+                        else:
+                            if token:
+                                return self._record_login_success(
+                                    token, target_url, prof, "0"
+                                )
+                            if err_leg:
+                                msg = f"[{prof} @ {target_url}] legacy: {err_leg}"
+                                _LOGGER.warning("Hoymiles auth attempt failed: %s", msg)
+                                failure_details.append(msg)
+                                auth_failure_details.append(msg)
+                                if target_url == primary_url:
+                                    primary_auth_errors.append(err_leg)
+
+                                if _is_credential_rejection(err_leg):
+                                    self.token = None
+                                    self._token_acquired_at = 0.0
+                                    _LOGGER.error(
+                                        "Hoymiles legacy auth rejected credentials on %s: %s",
+                                        target_url,
+                                        err_leg,
+                                    )
+                                    raise HoymilesAuthError(err_leg)
+
+                                if (
+                                    is_last_gateway
+                                    and not prof_had_conn_error
+                                    and v3_conn_err is None
+                                    and _is_user_not_found(err_leg)
+                                ):
+                                    self.token = None
+                                    self._token_acquired_at = 0.0
+                                    raise HoymilesAuthError(err_leg)
+
+                    v3_reached = v3_conn_err is None and err is not None
+                    v3_missing_endpoint = (
+                        v3_conn_err is not None and "HTTP status 404" in str(v3_conn_err)
+                    )
+                    leg_reached = (
+                        not _is_user_not_found(err)
+                        and leg_conn_err is None
+                        and err_leg is not None
+                    )
+                    gateway_reached = v3_reached or (
+                        leg_reached and (v3_conn_err is None or v3_missing_endpoint)
+                    )
+                    if not gateway_reached:
+                        prof_had_conn_error = True
+                        any_gateway_unreachable = True
+                        if target_url == primary_url:
+                            primary_all_profiles_reached = False
+
+            self.token = None
+            self._token_acquired_at = 0.0
+
+            # Only raise HoymilesAuthError when the server actually answered with a
+            # failed login payload, not when transport/HTTP errors blocked attempts.
+            primary_rejected_account = primary_all_profiles_reached and any(
+                not _is_user_not_found(e) for e in primary_auth_errors
+            )
+            if not auth_failure_details or (
+                any_gateway_unreachable and not primary_rejected_account
+            ):
+                best_conn_error = (
+                    connection_errors[0]
+                    if connection_errors
+                    else "Unable to connect to Hoymiles Cloud"
+                )
+                _LOGGER.error(
+                    "Hoymiles login failed due to connection/server errors: %s",
+                    failure_details,
+                )
+                raise HoymilesConnectionError(best_conn_error)
 
             # Choose the most specific error message to present to user
             best_error = "Invalid username or password"
-            for detail in failure_details:
+            for detail in auth_failure_details:
                 lower = detail.lower()
                 if (
                     "s-miles home" in lower
@@ -575,11 +694,8 @@ class HoymilesCloudClient:
                     best_error = detail
                     break
             else:
-                if failure_details:
-                    best_error = failure_details[0]
+                best_error = auth_failure_details[0]
 
-            self.token = None
-            self._token_acquired_at = 0.0
             _LOGGER.error(
                 "All Hoymiles authentication attempts failed: %s", failure_details
             )
@@ -723,7 +839,7 @@ class HoymilesCloudClient:
                                 f"HTTP status {retry_resp.status} on retry of {endpoint}"
                             )
                         data = await retry_resp.json()
-                except aiohttp.ClientError as err:
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
                     raise HoymilesConnectionError(
                         f"Connection error on retry of {endpoint}: {err}"
                     ) from err

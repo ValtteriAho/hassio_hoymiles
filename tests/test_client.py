@@ -152,6 +152,136 @@ async def test_v3_salted_failure_does_not_try_unsalted_variants(client):
     assert mock_attempt.call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_login_http_502_raises_connection_error(client):
+    """Test that HTTP 5xx during login raises HoymilesConnectionError, not HoymilesAuthError."""
+    mock_resp = AsyncMock()
+    mock_resp.status = 502
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.return_value = mock_resp
+    mock_session.closed = False
+    client._session = mock_session
+
+    with pytest.raises(HoymilesConnectionError):
+        await client.async_login()
+
+
+@pytest.mark.asyncio
+async def test_login_network_timeout_raises_connection_error(client):
+    """Test that network timeouts during login raise HoymilesConnectionError."""
+    import asyncio
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.side_effect = asyncio.TimeoutError("Timed out")
+    mock_session.closed = False
+    client._session = mock_session
+
+    with pytest.raises(HoymilesConnectionError):
+        await client.async_login()
+
+
+@pytest.mark.asyncio
+async def test_login_non_json_raises_connection_error(client):
+    """Test that non-JSON responses during login raise HoymilesConnectionError."""
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(side_effect=ValueError("Invalid JSON"))
+    mock_resp.text = AsyncMock(return_value="<html>502 Bad Gateway</html>")
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.return_value = mock_resp
+    mock_session.closed = False
+    client._session = mock_session
+
+    with pytest.raises(HoymilesConnectionError):
+        await client.async_login()
+
+
+@pytest.mark.asyncio
+async def test_login_primary_outage_fallback_user_not_found_raises_connection_error():
+    """Test that primary gateway outage + fallback 'User not found' raises ConnectionError."""
+    from custom_components.hoymiles_cloud.const import API_EU_BASE_URL, PROFILE_HOME
+
+    eu_client = HoymilesCloudClient(
+        username="eu_user",
+        password="secret_password",
+        base_url=API_EU_BASE_URL,
+        profile=PROFILE_HOME,
+    )
+
+    async def mock_v3(url, *args, **kwargs):
+        if "euapi" in url:
+            raise HoymilesConnectionError("HTTP status 503 on pre-inspect")
+        return None, "User not found"
+
+    with patch.object(eu_client, "_async_v3_login", side_effect=mock_v3), patch.object(
+        eu_client,
+        "_async_legacy_login",
+        AsyncMock(side_effect=HoymilesConnectionError("HTTP status 503")),
+    ):
+        with pytest.raises(HoymilesConnectionError):
+            await eu_client.async_login()
+
+
+@pytest.mark.asyncio
+async def test_login_server_rejection_payload_raises_auth_error(client):
+    """Test that server rejection JSON payloads raise HoymilesAuthError."""
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(
+        return_value={"status": "1", "message": "Please use S-Miles Home"}
+    )
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.return_value = mock_resp
+    mock_session.closed = False
+    client._session = mock_session
+
+    with pytest.raises(HoymilesAuthError) as exc_info:
+        await client.async_login()
+
+    assert "S-Miles Home" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_login_v3_404_falls_back_to_legacy_and_succeeds(client):
+    """Test that HTTP 404 on v3 pre-inspect falls back to legacy login and succeeds."""
+    mock_resp_404 = AsyncMock()
+    mock_resp_404.status = 404
+
+    mock_resp_legacy = AsyncMock()
+    mock_resp_legacy.status = 200
+    mock_resp_legacy.json = AsyncMock(
+        return_value={"status": "0", "data": {"token": "legacy_fallback_token"}}
+    )
+
+    mock_session = MagicMock()
+    mock_session.post.return_value.__aenter__.side_effect = [
+        mock_resp_404,
+        mock_resp_legacy,
+    ]
+    mock_session.closed = False
+    client._session = mock_session
+
+    token = await client.async_login()
+    assert token == "legacy_fallback_token"
+    assert client.api_version == "0"
+
+
+@pytest.mark.asyncio
+async def test_login_v3_502_legacy_generic_failure_raises_connection_error(client):
+    """Test that 502 on v3 + generic failure on legacy raises HoymilesConnectionError."""
+    async def mock_post_auth(url, payload, profile, context):
+        if context == "pre-inspect":
+            raise HoymilesConnectionError(f"HTTP status 502 on pre-inspect ({url})")
+        return {"status": "1", "message": "Legacy login failed"}
+
+    with patch.object(client, "_post_auth_json", side_effect=mock_post_auth):
+        with pytest.raises(HoymilesConnectionError):
+            await client.async_login()
+
+
 
 @pytest.mark.asyncio
 async def test_get_stations(client):

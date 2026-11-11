@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.hoymiles_cloud.client import (
     HoymilesAuthError,
+    HoymilesConnectionError,
     MicroInverterInfo,
     PlantDevices,
     StationRealData,
@@ -103,6 +105,25 @@ async def test_coordinator_auth_error_raises_config_entry_auth_failed(mock_clien
     )
 
     with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_connection_error_raises_update_failed(mock_client):
+    """Test that coordinator raises UpdateFailed (not ConfigEntryAuthFailed) on outages."""
+    mock_client.async_get_real_data = AsyncMock(
+        side_effect=HoymilesConnectionError("HTTP status 502 on pre-inspect")
+    )
+    hass = MagicMock()
+    coordinator = HoymilesDataUpdateCoordinator(
+        hass=hass,
+        client=mock_client,
+        plant_id=1001,
+        plant_name="My Solar Plant",
+        update_interval_seconds=300,
+    )
+
+    with pytest.raises(UpdateFailed):
         await coordinator._async_update_data()
 
 
